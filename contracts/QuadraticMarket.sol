@@ -29,13 +29,11 @@ import "./libraries/LibGroupDiscount.sol";
 ///
 /// • Multi-leg bet slips apply a same-match correlation discount via LibGroupDiscount.
 ///
-/// Phase 1 — this file covers:
-///   ✓ Complete storage layout (all phases)
-///   ✓ Initialization
-///   ✓ Admin & operator management
-///   ✓ Epoch initialization & advancement
+/// Phase 1 — Core storage, initialization, admin, epoch management
+/// Phase 2 — LP vault: addLiquidity, requestWithdraw, processWithdrawal,
+///            sport-category voting, exposure-cap enforcement
 ///
-/// Phases 2–7 add functions without touching storage layout.
+/// Phases 3–7 add functions without touching storage layout.
 
 contract QuadraticMarket is ReentrancyGuard, IQuadraticMarketEvents, IQuadraticMarketErrors {
     using SafeERC20 for IERC20;
@@ -159,9 +157,19 @@ contract QuadraticMarket is ReentrancyGuard, IQuadraticMarketEvents, IQuadraticM
     /// @notice USDC locked per open back-order (separate from LP pool).
     uint256 public orderCollateralLocked;
 
+    // ── LP category voting ─────────────────────────────────────────────────────
+    /// @notice Total vote-weight per sport category per epoch.
+    ///         epochCategoryVotes[epochId][uint8(SportCategory)] → totalShares voted
+    mapping(uint64 => mapping(uint8 => uint256)) public epochCategoryVotes;
+
+    /// @notice Track which category each LP voted for per epoch (prevents double-voting).
+    ///         lpCategoryVote[lp][epochId] → uint8(SportCategory) + 1  (0 = not yet voted)
+    mapping(address => mapping(uint64 => uint8)) public lpCategoryVote;
+
     // ─── Constants ────────────────────────────────────────────────────────────
 
     uint256 private constant MIN_FIRST_LIQUIDITY = 1_000; // inflation attack guard
+    uint8   private constant NUM_SPORT_CATEGORIES = 6;    // must match SportCategory enum
 
     // ─── Modifiers ────────────────────────────────────────────────────────────
 
@@ -301,65 +309,238 @@ contract QuadraticMarket is ReentrancyGuard, IQuadraticMarketEvents, IQuadraticM
     // ─── Epoch Management ─────────────────────────────────────────────────────
 
     /// @notice Initialize the on-chain Epoch record for `currentEpoch`.
-    ///         Must be called by admin/operator before any markets can be created.
-    ///         Idempotent: no-op if epoch already initialized.
+    ///         Opens the LP deposit window immediately. Deposits close at `epochStartTime`.
+    ///         Markets can only be created after `epochStartTime` (when trading begins).
+    ///
+    /// @param epochStartTime          Unix timestamp when trading opens and deposits close.
+    ///                                Must be in the future. Deposit window = [now, epochStartTime].
     /// @param maxExposureMultiplierBps  e.g. 15 000 = 1.5× — LP can lose at most 50% of deposit.
-    function initEpoch(uint256 maxExposureMultiplierBps) external onlyAuthorized {
+    ///                                  Enforced on every bet: totalLockedPayouts ≤ deposit × multiplier.
+    function initEpoch(
+        uint256 epochStartTime,
+        uint256 maxExposureMultiplierBps
+    ) external onlyAuthorized {
         uint64 eid = currentEpoch;
         Epoch storage ep = epochs[eid];
 
-        if (ep.epochId != 0 && ep.startTime != 0) {
-            revert EpochAlreadyInitialized();
-        }
+        // Use the `initialized` flag — fixes epoch-0 bug where epochId==0 was ambiguous
+        if (ep.initialized) revert EpochAlreadyInitialized();
+        if (epochStartTime <= block.timestamp) revert InvalidAmount(); // must be future
 
-        uint256 duration = epochDurationSeconds;
-        uint256 epochStart = duration > 0
-            ? (block.timestamp / duration) * duration
-            : block.timestamp;
+        uint256 endTime = epochStartTime + epochDurationSeconds;
 
-        ep.epochId                   = eid;
-        ep.startTime                 = epochStart;
-        ep.endTime                   = duration > 0 ? epochStart + duration : type(uint256).max;
-        ep.totalLiquidityAdded       = 0;
-        ep.totalLiquidityRemoved     = 0;
-        ep.numMarkets                = 0;
-        ep.numSettledMarkets         = 0;
-        ep.allMarketsSettled         = true;  // true until first market is created
-        ep.withdrawalsEnabled        = true;
-        ep.lpSharesAtClose           = totalLpShares;
-        ep.maxExposureMultiplierBps  = maxExposureMultiplierBps > 0
+        ep.epochId                  = eid;
+        ep.startTime                = epochStartTime;
+        ep.endTime                  = endTime;
+        ep.initialized              = true;
+        ep.allMarketsSettled        = true;   // true until first market is added
+        ep.withdrawalsEnabled       = false;  // enabled after all markets settle
+        ep.lpSharesAtClose          = 0;
+        ep.totalLiquidityAdded      = 0;
+        ep.totalLiquidityRemoved    = 0;
+        ep.numMarkets               = 0;
+        ep.numSettledMarkets        = 0;
+        ep.totalLockedPayouts       = 0;
+        ep.maxExposureMultiplierBps = maxExposureMultiplierBps > 0
             ? maxExposureMultiplierBps
-            : 15_000; // default 1.5×
-        ep.totalLockedPayouts        = 0;
+            : 15_000;
+        ep.winningSportCategory     = 0;
 
-        if (duration > 0) {
-            nextEpochStart = epochStart + duration;
-        }
+        nextEpochStart = endTime;
 
-        emit EpochInitialized(eid, ep.startTime, ep.endTime);
+        emit EpochInitialized(eid, epochStartTime, endTime);
+        emit EpochDepositsGated(eid, epochStartTime);
     }
 
-    /// @notice Advance to the next epoch.
-    ///         Requires all markets in the current epoch to be settled first.
-    ///         Caller must then call initEpoch() to open the new epoch.
+    /// @notice Advance to the next epoch once all current-epoch markets are settled.
+    ///         Flips `withdrawalsEnabled` on the completed epoch so LPs can exit.
+    ///         Caller must then call initEpoch() to open the new epoch for deposits.
     function advanceEpoch() external onlyAuthorized {
         Epoch storage ep = epochs[currentEpoch];
 
-        // All markets must be settled (or epoch has zero markets)
-        if (!ep.allMarketsSettled && ep.numSettledMarkets < ep.numMarkets) {
+        if (!ep.initialized) revert EpochAlreadyInitialized();
+
+        // Every market in the epoch must be settled (voided markets count as settled)
+        if (ep.numMarkets > 0 && ep.numSettledMarkets < ep.numMarkets) {
             revert EpochNotSettled();
         }
 
-        // Record share count for NAV calculation on withdrawal
-        ep.lpSharesAtClose = totalLpShares;
+        ep.allMarketsSettled  = true;
         ep.withdrawalsEnabled = true;
+        ep.lpSharesAtClose    = totalLpShares;
 
         uint64 prev = currentEpoch;
         unchecked { ++currentEpoch; }
-
         epochPaused = false;
 
         emit EpochAdvanced(prev, currentEpoch);
+    }
+
+    // ─── Phase 2 — LP Vault ───────────────────────────────────────────────────
+    //
+    // Epoch lifecycle for LPs:
+    //   1. Admin calls initEpoch(epochStartTime, multiplierBps)
+    //   2. LPs call addLiquidity() — only accepted while block.timestamp < epoch.startTime
+    //   3. LPs optionally call voteCategory() to influence which sport gets markets
+    //   4. Admin creates markets once epoch.startTime passes
+    //   5. Bettors place bets; exposure cap enforced per bet
+    //   6. epoch.endTime passes → oracle settles markets → advanceEpoch()
+    //   7. LPs call requestWithdraw() → wait cooldown → processWithdrawal()
+    //
+    // NAV formula (ERC4626-style):
+    //   shares_out = amount × totalLpShares / treasuryBalance   (pro-rata)
+    //   amount_out = shares  × treasuryBalance / totalLpShares  (on withdrawal)
+    //   First deposit: shares = amount − MIN_FIRST_LIQUIDITY (inflation-attack guard)
+
+    /// @notice Deposit USDC into the LP vault for the current epoch.
+    ///         Only callable during the deposit window (before epoch.startTime).
+    ///         Mints LP shares at current NAV. Shares represent a pro-rata claim on
+    ///         the treasury after all epoch markets are settled.
+    ///
+    /// @param amount  USDC amount to deposit (in base-token units, 6 decimals).
+    function addLiquidity(uint256 amount) external nonReentrant whenNotPaused {
+        if (amount == 0) revert InvalidAmount();
+
+        Epoch storage ep = epochs[currentEpoch];
+        if (!ep.initialized) revert EpochAlreadyInitialized();
+
+        // Deposit window: only before epoch starts (trading begins at startTime)
+        if (block.timestamp >= ep.startTime) revert EpochLiquidityGated();
+
+        uint256 bal = baseToken.balanceOf(address(this));
+        uint256 shares;
+
+        if (totalLpShares == 0) {
+            // First-ever deposit: lock MIN_FIRST_LIQUIDITY permanently as dead shares
+            // to prevent the ERC4626 inflation / donation attack.
+            if (amount <= MIN_FIRST_LIQUIDITY) revert InvalidAmount();
+            shares = amount - MIN_FIRST_LIQUIDITY;
+            // MIN_FIRST_LIQUIDITY stays in treasury, not represented by any shares.
+        } else {
+            // NAV-based issuance: shares = amount × totalSupply / vaultBalance
+            // Uses pre-transfer balance so incoming tokens don't inflate the rate.
+            shares = (amount * totalLpShares) / bal;
+            if (shares == 0) revert InvalidAmount();
+        }
+
+        // Pull USDC from LP → treasury (this contract)
+        baseToken.safeTransferFrom(msg.sender, address(this), amount);
+
+        // Credit shares
+        lpShares[msg.sender]                          += shares;
+        totalLpShares                                 += shares;
+        lpDepositsPerEpoch[msg.sender][currentEpoch]  += amount;
+        ep.totalLiquidityAdded                        += amount;
+
+        emit LiquidityAdded(msg.sender, amount, shares, currentEpoch);
+    }
+
+    /// @notice Queue an LP withdrawal for `shares` of the LP vault.
+    ///         Only callable after the epoch has ended AND all markets are settled
+    ///         (withdrawalsEnabled == true), which is set by advanceEpoch().
+    ///         A cooldown period (withdrawalCooldownSeconds) must then pass before
+    ///         processWithdrawal() can execute the actual transfer.
+    ///
+    /// @param shares  Number of LP shares to redeem.
+    function requestWithdraw(uint256 shares) external whenNotPaused {
+        if (shares == 0) revert InvalidAmount();
+        if (lpShares[msg.sender] < shares) revert InsufficientLiquidity();
+        if (withdrawalRequests[msg.sender].exists) revert WithdrawalCooldownActive();
+
+        // Withdrawals allowed only after epoch end + all markets settled
+        // advanceEpoch() sets withdrawalsEnabled = true on the completed epoch.
+        // LPs may withdraw from any past epoch's settlement proceeds; we check
+        // the most-recently completed epoch (currentEpoch - 1) or the current one
+        // if it already has withdrawalsEnabled.
+        bool canWithdraw = false;
+
+        // Check current epoch first (may already be settled if it had zero markets)
+        if (epochs[currentEpoch].withdrawalsEnabled) {
+            canWithdraw = true;
+        }
+        // Check previous epoch (normal case: advanceEpoch just ran)
+        else if (currentEpoch > 0 && epochs[currentEpoch - 1].withdrawalsEnabled) {
+            canWithdraw = true;
+        }
+
+        if (!canWithdraw) revert EpochNotSettled();
+
+        withdrawalRequests[msg.sender] = WithdrawalRequest({
+            shares:      shares,
+            requestedAt: block.timestamp,
+            epochId:     currentEpoch,
+            exists:      true
+        });
+
+        emit WithdrawalRequested(msg.sender, shares, currentEpoch);
+    }
+
+    /// @notice Execute a queued withdrawal after the cooldown period.
+    ///         Redeems LP shares at current NAV and transfers USDC to caller.
+    ///         Will revert if free liquidity is insufficient (outstanding payouts
+    ///         are still locked — LP must wait for bettors to claim or markets to void).
+    function processWithdrawal() external nonReentrant whenNotPaused {
+        WithdrawalRequest storage req = withdrawalRequests[msg.sender];
+        if (!req.exists) revert NoPendingWithdrawal();
+
+        // Cooldown guard
+        if (block.timestamp < req.requestedAt + withdrawalCooldownSeconds) {
+            revert WithdrawalCooldownActive();
+        }
+
+        uint256 shares = req.shares;
+        if (lpShares[msg.sender] < shares) revert InsufficientLiquidity();
+
+        // NAV-based redemption: amount = shares × treasuryBalance / totalSupply
+        uint256 bal    = baseToken.balanceOf(address(this));
+        uint256 amount = (shares * bal) / totalLpShares;
+        if (amount == 0) revert InvalidAmount();
+
+        // Can only pay out free liquidity (locked payouts must stay in treasury)
+        if (amount > freeLiquidity()) revert InsufficientLiquidity();
+
+        // Burn shares
+        lpShares[msg.sender] -= shares;
+        totalLpShares        -= shares;
+
+        epochs[req.epochId].totalLiquidityRemoved += amount;
+
+        delete withdrawalRequests[msg.sender];
+
+        baseToken.safeTransfer(msg.sender, amount);
+
+        emit WithdrawalProcessed(msg.sender, amount, shares);
+    }
+
+    // ─── LP Category Voting ────────────────────────────────────────────────────
+
+    /// @notice Vote on which sport category should have markets in the next epoch.
+    ///         Vote weight = caller's current LP share balance.
+    ///         One vote per LP per epoch; changing vote not supported (vote early).
+    ///         Admin reads the winning category off-chain and creates markets accordingly.
+    ///         This keeps governance lightweight — LPs signal preference, admin executes.
+    ///
+    /// @param category  The SportCategory to vote for.
+    function voteCategory(SportCategory category) external whenNotPaused {
+        if (lpShares[msg.sender] == 0) revert InsufficientLiquidity();
+
+        uint64 eid     = currentEpoch;
+        uint8  catKey  = uint8(category);
+
+        // Prevent double-voting (stored as catKey + 1 so 0 = no vote)
+        if (lpCategoryVote[msg.sender][eid] != 0) revert InvalidAmount();
+
+        uint256 weight = lpShares[msg.sender];
+        lpCategoryVote[msg.sender][eid]  = catKey + 1;
+        epochCategoryVotes[eid][catKey] += weight;
+
+        // Update winning category (highest vote-weight wins; ties go to lower enum value)
+        uint8 winner = epochs[eid].winningSportCategory;
+        if (epochCategoryVotes[eid][catKey] > epochCategoryVotes[eid][winner]) {
+            epochs[eid].winningSportCategory = catKey;
+        }
+
+        emit CategoryVoted(msg.sender, eid, category, weight);
     }
 
     // ─── Internal helpers ─────────────────────────────────────────────────────
@@ -409,6 +590,37 @@ contract QuadraticMarket is ReentrancyGuard, IQuadraticMarketEvents, IQuadraticM
         if (block.timestamp >= markets[marketId].startTime) revert MarketAlreadyStarted();
     }
 
+    // ─── Exposure cap enforcement (called by Phase 3 bet functions) ──────────
+
+    /// @dev Reverts if adding `newPayout` to an epoch's locked payouts would breach
+    ///      the LP exposure cap: totalLockedPayouts ≤ epochDeposit × multiplier.
+    ///      Called inside buyAtOdds and placeSlip before accepting any bet.
+    function _checkEpochExposure(uint64 epochId, uint256 newPayout) internal view {
+        Epoch storage ep = epochs[epochId];
+        uint256 maxExposure = LibOdds.maxEpochExposure(
+            ep.totalLiquidityAdded,
+            ep.maxExposureMultiplierBps
+        );
+        // maxExposure == 0 when no LP has deposited — reject all bets
+        if (maxExposure == 0) revert InsufficientLiquidity();
+        if (ep.totalLockedPayouts + newPayout > maxExposure) revert VolumeCapExceeded();
+    }
+
+    /// @dev Increment epoch's locked payout counter and the global counter.
+    ///      Called after _checkEpochExposure passes.
+    function _lockPayout(uint64 epochId, uint256 payout) internal {
+        epochs[epochId].totalLockedPayouts += payout;
+        totalLockedPayouts                 += payout;
+    }
+
+    /// @dev Decrement epoch's locked payout counter and the global counter.
+    ///      Called when a bet is claimed, market voided, or cash-out processed.
+    function _unlockPayout(uint64 epochId, uint256 payout) internal {
+        uint256 ep = epochs[epochId].totalLockedPayouts;
+        epochs[epochId].totalLockedPayouts = ep > payout ? ep - payout : 0;
+        totalLockedPayouts = totalLockedPayouts > payout ? totalLockedPayouts - payout : 0;
+    }
+
     // ─── View helpers ─────────────────────────────────────────────────────────
 
     /// @notice Current USDC balance held by this contract (treasury).
@@ -418,15 +630,54 @@ contract QuadraticMarket is ReentrancyGuard, IQuadraticMarketEvents, IQuadraticM
 
     /// @notice Free liquidity = treasury balance minus all outstanding payout obligations.
     function freeLiquidity() public view returns (uint256) {
-        uint256 bal = baseToken.balanceOf(address(this));
+        uint256 bal    = baseToken.balanceOf(address(this));
         uint256 locked = totalLockedPayouts + orderCollateralLocked;
         return bal > locked ? bal - locked : 0;
     }
 
-    /// @notice Current LP share NAV in base token units (price per share).
+    /// @notice Current LP share NAV: USDC value per share (scaled by ODDS_PRECISION).
+    ///         e.g. 1_050_000 = 1.05 USDC per share (5% gain since deposit).
     function lpNav() public view returns (uint256) {
         if (totalLpShares == 0) return ODDS_PRECISION; // 1.0 initial NAV
         return (baseToken.balanceOf(address(this)) * ODDS_PRECISION) / totalLpShares;
+    }
+
+    /// @notice USDC value of an LP's entire share balance at current NAV.
+    function lpValue(address lp) external view returns (uint256) {
+        if (totalLpShares == 0) return 0;
+        return (lpShares[lp] * baseToken.balanceOf(address(this))) / totalLpShares;
+    }
+
+    /// @notice Maximum total payout obligation allowed for an epoch given current deposits.
+    ///         Bets are rejected once this ceiling is reached.
+    function epochMaxExposure(uint64 epochId) external view returns (uint256) {
+        Epoch storage ep = epochs[epochId];
+        return LibOdds.maxEpochExposure(ep.totalLiquidityAdded, ep.maxExposureMultiplierBps);
+    }
+
+    /// @notice Remaining payout capacity an epoch can still accept.
+    function epochRemainingCapacity(uint64 epochId) external view returns (uint256) {
+        Epoch storage ep = epochs[epochId];
+        uint256 max = LibOdds.maxEpochExposure(ep.totalLiquidityAdded, ep.maxExposureMultiplierBps);
+        return max > ep.totalLockedPayouts ? max - ep.totalLockedPayouts : 0;
+    }
+
+    /// @notice The sport category with the most LP vote-weight for an epoch.
+    function epochWinningCategory(uint64 epochId) external view returns (SportCategory, uint256 voteWeight) {
+        uint8 winner = epochs[epochId].winningSportCategory;
+        return (SportCategory(winner), epochCategoryVotes[epochId][winner]);
+    }
+
+    /// @notice Category vote totals for all categories in a given epoch.
+    function epochCategoryBreakdown(uint64 epochId)
+        external
+        view
+        returns (uint256[6] memory votes)
+    {
+        for (uint8 i = 0; i < NUM_SPORT_CATEGORIES; ) {
+            votes[i] = epochCategoryVotes[epochId][i];
+            unchecked { ++i; }
+        }
     }
 
     /// @notice Whether an address is admin or operator.

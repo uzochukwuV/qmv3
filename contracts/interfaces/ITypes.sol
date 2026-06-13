@@ -50,6 +50,18 @@ enum DisputeStatus {
     Overridden        // Admin corrected the oracle result
 }
 
+/// @notice Sport categories LPs vote on each epoch.
+///         Admin creates markets only within the winning category/categories.
+///         Voting weight = LP share balance at time of vote.
+enum SportCategory {
+    Football,         // 0 — Soccer / Association Football
+    Tennis,           // 1
+    Basketball,       // 2
+    AmericanFootball, // 3
+    Esports,          // 4
+    Other             // 5
+}
+
 // ─── Structs ──────────────────────────────────────────────────────────────────
 
 uint256 constant MAX_OUTCOMES    = 8;
@@ -115,20 +127,36 @@ struct Market {
 }
 
 /// @notice Time-bounded LP period. All markets within an epoch share the LP pool.
+///
+/// Timeline:
+///   [initEpoch called]
+///     → deposit window opens  (LPs deposit USDC, receive shares)
+///   [startTime]
+///     → deposit window CLOSES (no more deposits)
+///     → markets open for betting
+///   [endTime]
+///     → no new bets accepted
+///     → oracle settles markets
+///   [allMarketsSettled == true]
+///     → withdrawalsEnabled flipped by advanceEpoch
+///     → LPs requestWithdraw → processWithdrawal (after cooldown)
 struct Epoch {
     uint64   epochId;
-    uint256  startTime;
-    uint256  endTime;
-    uint256  totalLiquidityAdded;
-    uint256  totalLiquidityRemoved;
+    uint256  startTime;           // epoch trading begins; deposit window closes here
+    uint256  endTime;             // epoch trading ends
+    uint256  totalLiquidityAdded;    // sum of all LP deposits this epoch
+    uint256  totalLiquidityRemoved;  // sum of all LP withdrawals this epoch
     uint16   numMarkets;
     uint16   numSettledMarkets;
     bool     allMarketsSettled;
     bool     withdrawalsEnabled;
+    bool     initialized;            // guards against double-init (fixes epoch-0 bug)
     uint256  lpSharesAtClose;
-    // Risk controls added per MD file spec
-    uint256  maxExposureMultiplierBps; // e.g. 15_000 = 1.5x: max loss = 50% of deposit
-    uint256  totalLockedPayouts;       // running sum of all outstanding payout obligations
+    // Risk controls (from MD files)
+    uint256  maxExposureMultiplierBps; // e.g. 15_000 = 1.5× → max LP loss = 50% of deposit
+    uint256  totalLockedPayouts;       // running payout obligations; must stay ≤ maxExposure
+    // Category governance
+    uint8    winningSportCategory;     // SportCategory with most vote-weight this epoch
 }
 
 /// @notice One leg of a multi-market bet slip.
@@ -261,6 +289,8 @@ interface IQuadraticMarketEvents {
     event LiquidityAdded(address indexed lp, uint256 amount, uint256 sharesIssued, uint64 epochId);
     event WithdrawalRequested(address indexed lp, uint256 shares, uint64 epochId);
     event WithdrawalProcessed(address indexed lp, uint256 amount, uint256 shares);
+    event CategoryVoted(address indexed lp, uint64 indexed epochId, SportCategory category, uint256 weight);
+    event EpochDepositsGated(uint64 indexed epochId, uint256 startTime);
 
     // Market Groups
     event MarketGroupCreated(uint64 indexed groupId, string title, uint256 eventStartTime);
