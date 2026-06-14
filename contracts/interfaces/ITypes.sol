@@ -202,6 +202,7 @@ struct Order {
 struct WithdrawalRequest {
     uint256  shares;
     uint256  requestedAt;
+    uint256  snapshotNav;   // NAV (× ODDS_PRECISION) at request time — withdrawal uses min(snapshot, current)
     uint64   epochId;
     bool     exists;
 }
@@ -303,6 +304,8 @@ interface IQuadraticMarketEvents {
 }
 
 /// @notice Struct passed to updateConfig to avoid stack-too-deep on many params.
+///         Pass type(uint256).max (or address(type(uint160).max) for oracle) to leave a field unchanged.
+///         Pass the desired value — including 0 — to update a field.
 struct ConfigUpdate {
     uint256 maxMarketExposure;
     uint256 challengeWindowSeconds;
@@ -353,6 +356,7 @@ interface IQuadraticMarketErrors {
 
     error EpochNotSettled();
     error EpochAlreadyInitialized();
+    error EpochNotInitialized();
     error WithdrawalCooldownActive();
     error NoPendingWithdrawal();
     error EpochLiquidityGated();

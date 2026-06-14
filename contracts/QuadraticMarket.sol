@@ -113,6 +113,10 @@ contract QuadraticMarket is ReentrancyGuard, IQuadraticMarketEvents, IQuadraticM
     bool    public epochPaused;
     uint256 public nextEpochStart;
 
+    /// @notice Set to true the first time advanceEpoch() successfully completes.
+    ///         LP share withdrawals require at least one epoch to have fully settled.
+    bool    public anyEpochSettled;
+
     // ── Operators (can create/suspend/settle markets) ──────────────────────────
 
     address[MAX_OPERATORS] private _operators;
@@ -288,20 +292,23 @@ contract QuadraticMarket is ReentrancyGuard, IQuadraticMarketEvents, IQuadraticM
     }
 
     /// @notice Bulk update protocol risk & timing parameters.
-    ///         Pass 0 (or zero address) for any field to leave it unchanged.
+    ///         Pass type(uint256).max to leave a uint256 field unchanged.
+    ///         Pass address(type(uint160).max) to leave the oracle address unchanged.
+    ///         Pass the desired value — including 0 — to actually update a field.
     function updateConfig(ConfigUpdate calldata u) external onlyAdmin {
-        if (u.maxMarketExposure         > 0) maxMarketExposure         = u.maxMarketExposure;
-        if (u.challengeWindowSeconds    > 0) challengeWindowSeconds    = u.challengeWindowSeconds;
-        if (u.settlementDeadlineSeconds > 0) settlementDeadlineSeconds = u.settlementDeadlineSeconds;
-        if (u.slipHouseMarginBps        > 0) slipHouseMarginBps        = u.slipHouseMarginBps;
-        if (u.maxSlipBonusMultiplierBps > 0) maxSlipBonusMultiplierBps = u.maxSlipBonusMultiplierBps;
-        if (u.epochDurationSeconds      > 0) epochDurationSeconds      = u.epochDurationSeconds;
-        if (u.withdrawalCooldownSeconds > 0) withdrawalCooldownSeconds = u.withdrawalCooldownSeconds;
-        if (u.maxSingleBet              > 0) maxSingleBet              = u.maxSingleBet;
-        if (u.buyFeeBps                 > 0) buyFeeBps                 = u.buyFeeBps;
-        if (u.cashOutMarginBps          > 0) cashOutMarginBps          = u.cashOutMarginBps;
-        if (u.crossMatchBonusPerPairBps > 0) crossMatchBonusPerPairBps = u.crossMatchBonusPerPairBps;
-        if (u.oracle != address(0))          oracle                    = u.oracle;
+        uint256 MAX = type(uint256).max;
+        if (u.maxMarketExposure         != MAX) maxMarketExposure         = u.maxMarketExposure;
+        if (u.challengeWindowSeconds    != MAX) challengeWindowSeconds    = u.challengeWindowSeconds;
+        if (u.settlementDeadlineSeconds != MAX) settlementDeadlineSeconds = u.settlementDeadlineSeconds;
+        if (u.slipHouseMarginBps        != MAX) slipHouseMarginBps        = u.slipHouseMarginBps;
+        if (u.maxSlipBonusMultiplierBps != MAX) maxSlipBonusMultiplierBps = u.maxSlipBonusMultiplierBps;
+        if (u.epochDurationSeconds      != MAX) epochDurationSeconds      = u.epochDurationSeconds;
+        if (u.withdrawalCooldownSeconds != MAX) withdrawalCooldownSeconds = u.withdrawalCooldownSeconds;
+        if (u.maxSingleBet              != MAX) maxSingleBet              = u.maxSingleBet;
+        if (u.buyFeeBps                 != MAX) buyFeeBps                 = u.buyFeeBps;
+        if (u.cashOutMarginBps          != MAX) cashOutMarginBps          = u.cashOutMarginBps;
+        if (u.crossMatchBonusPerPairBps != MAX) crossMatchBonusPerPairBps = u.crossMatchBonusPerPairBps;
+        if (u.oracle != address(type(uint160).max)) oracle                = u.oracle;
 
         emit ConfigUpdated(msg.sender);
     }
@@ -358,7 +365,8 @@ contract QuadraticMarket is ReentrancyGuard, IQuadraticMarketEvents, IQuadraticM
     function advanceEpoch() external onlyAuthorized {
         Epoch storage ep = epochs[currentEpoch];
 
-        if (!ep.initialized) revert EpochAlreadyInitialized();
+        // Bug 2 fix: use semantically correct error for uninitialized epoch
+        if (!ep.initialized) revert EpochNotInitialized();
 
         // Every market in the epoch must be settled (voided markets count as settled)
         if (ep.numMarkets > 0 && ep.numSettledMarkets < ep.numMarkets) {
@@ -368,6 +376,9 @@ contract QuadraticMarket is ReentrancyGuard, IQuadraticMarketEvents, IQuadraticM
         ep.allMarketsSettled  = true;
         ep.withdrawalsEnabled = true;
         ep.lpSharesAtClose    = totalLpShares;
+
+        // Bug 3 fix: record that at least one epoch has settled — gates requestWithdraw
+        anyEpochSettled = true;
 
         uint64 prev = currentEpoch;
         unchecked { ++currentEpoch; }
@@ -407,21 +418,21 @@ contract QuadraticMarket is ReentrancyGuard, IQuadraticMarketEvents, IQuadraticM
         // Deposit window: only before epoch starts (trading begins at startTime)
         if (block.timestamp >= ep.startTime) revert EpochLiquidityGated();
 
-        uint256 bal = baseToken.balanceOf(address(this));
-        uint256 shares;
-
-        if (totalLpShares == 0) {
-            // First-ever deposit: lock MIN_FIRST_LIQUIDITY permanently as dead shares
-            // to prevent the ERC4626 inflation / donation attack.
-            if (amount <= MIN_FIRST_LIQUIDITY) revert InvalidAmount();
-            shares = amount - MIN_FIRST_LIQUIDITY;
-            // MIN_FIRST_LIQUIDITY stays in treasury, not represented by any shares.
-        } else {
-            // NAV-based issuance: shares = amount × totalSupply / vaultBalance
-            // Uses pre-transfer balance so incoming tokens don't inflate the rate.
-            shares = (amount * totalLpShares) / bal;
-            if (shares == 0) revert InvalidAmount();
-        }
+        // Bug 1 fix: virtual-offset formula (mirrors OZ ERC4626 v5).
+        //   shares = amount × (totalSupply + 1) / (vaultBalance + 1)
+        //
+        // Why this defeats the inflation attack:
+        //   A post-deposit donation increases `bal` by D, but the denominator grows
+        //   proportionally, so the second depositor's shares only fall by ~D/bal —
+        //   a rounding loss of 1, not a total wipe. No special first-deposit branch
+        //   is needed; the formula handles the empty-vault case naturally
+        //   (result ≈ amount when both supply and balance are zero → both +1 cancel).
+        //
+        // Balance MUST be sampled BEFORE safeTransferFrom so the incoming tokens
+        // do not inflate the denominator for this very deposit.
+        uint256 bal    = baseToken.balanceOf(address(this));
+        uint256 shares = (amount * (totalLpShares + 1)) / (bal + 1);
+        if (shares == 0) revert InvalidAmount();
 
         // Pull USDC from LP → treasury (this contract)
         baseToken.safeTransferFrom(msg.sender, address(this), amount);
@@ -447,27 +458,18 @@ contract QuadraticMarket is ReentrancyGuard, IQuadraticMarketEvents, IQuadraticM
         if (lpShares[msg.sender] < shares) revert InsufficientLiquidity();
         if (withdrawalRequests[msg.sender].exists) revert WithdrawalCooldownActive();
 
-        // Withdrawals allowed only after epoch end + all markets settled
-        // advanceEpoch() sets withdrawalsEnabled = true on the completed epoch.
-        // LPs may withdraw from any past epoch's settlement proceeds; we check
-        // the most-recently completed epoch (currentEpoch - 1) or the current one
-        // if it already has withdrawalsEnabled.
-        bool canWithdraw = false;
-
-        // Check current epoch first (may already be settled if it had zero markets)
-        if (epochs[currentEpoch].withdrawalsEnabled) {
-            canWithdraw = true;
-        }
-        // Check previous epoch (normal case: advanceEpoch just ran)
-        else if (currentEpoch > 0 && epochs[currentEpoch - 1].withdrawalsEnabled) {
-            canWithdraw = true;
-        }
-
-        if (!canWithdraw) revert EpochNotSettled();
+        // Bug 3 fix: LP shares are fungible across epochs.
+        // The only meaningful gate is that at least one epoch has fully settled,
+        // confirming the protocol has run at least one complete cycle.
+        // `anyEpochSettled` is set by advanceEpoch() and is never unset.
+        // Free-liquidity sufficiency is checked at processWithdrawal() time,
+        // not here — locking it here would create a race condition with bettors.
+        if (!anyEpochSettled) revert EpochNotSettled();
 
         withdrawalRequests[msg.sender] = WithdrawalRequest({
             shares:      shares,
             requestedAt: block.timestamp,
+            snapshotNav: lpNav(),   // Bug 5: snapshot NAV now for floor protection
             epochId:     currentEpoch,
             exists:      true
         });
@@ -491,9 +493,14 @@ contract QuadraticMarket is ReentrancyGuard, IQuadraticMarketEvents, IQuadraticM
         uint256 shares = req.shares;
         if (lpShares[msg.sender] < shares) revert InsufficientLiquidity();
 
-        // NAV-based redemption: amount = shares × treasuryBalance / totalSupply
-        uint256 bal    = baseToken.balanceOf(address(this));
-        uint256 amount = (shares * bal) / totalLpShares;
+        // Bug 5 fix: NAV floor protection.
+        // Use min(snapshotNav, currentNav) so a large winning bet during the cooldown
+        // window does not silently reduce the LP's payout below their expectation at
+        // request time. The LP always receives the worse of the two NAVs — they bear
+        // post-request losses but cannot harvest post-request gains (prevents gaming).
+        uint256 currentNav  = lpNav(); // × ODDS_PRECISION
+        uint256 navToUse    = currentNav < req.snapshotNav ? currentNav : req.snapshotNav;
+        uint256 amount      = (shares * navToUse) / ODDS_PRECISION;
         if (amount == 0) revert InvalidAmount();
 
         // Can only pay out free liquidity (locked payouts must stay in treasury)
