@@ -166,6 +166,20 @@ contract QuadraticMarket is ReentrancyGuard, IQuadraticMarketEvents, IQuadraticM
     /// @notice Per-LP deposit tracking per epoch for NAV calculation.
     mapping(address => mapping(uint64 => uint256)) public lpDepositsPerEpoch;
 
+    // ── Slip token ownership (ERC721-like primitives for P2P marketplace) ──────
+    // NOTE: betSlips and nextSlipId are already declared in the main storage block above.
+
+    /// @notice Current owner of a slip. Set to placer at creation;
+    ///         updated by transferSlip. Receiver of payout / void-refund.
+    mapping(uint64 => address) public slipOwner;
+
+    /// @notice Single-address per-slip transfer approval (cleared on transfer).
+    mapping(uint64 => address) public slipApproved;
+
+    /// @notice Operator approval — owner grants an address rights over ALL their slips.
+    ///         Intended for the Phase 6 P2P marketplace contract.
+    mapping(address => mapping(address => bool)) public slipOperatorApprovals;
+
     /// @notice USDC locked per open back-order (separate from LP pool).
     uint256 public orderCollateralLocked;
 
@@ -1198,38 +1212,6 @@ contract QuadraticMarket is ReentrancyGuard, IQuadraticMarketEvents, IQuadraticM
         emit PayoutClaimed(marketId, msg.sender, payout);
     }
 
-    /// @notice Batch-claim payouts across multiple markets in one tx.
-    ///         Skips markets where the caller has no winning balance.
-    ///
-    /// @param marketIds Array of settled market IDs to claim from
-    function batchClaimPayout(uint64[] calldata marketIds) external nonReentrant whenNotPaused {
-        uint256 len   = marketIds.length;
-        uint256 total = 0;
-
-        for (uint256 i = 0; i < len; ) {
-            uint64  mid    = marketIds[i];
-            Market storage m = markets[mid];
-
-            if (m.status == MarketStatus.Settled) {
-                uint8   winner = m.winningOutcome;
-                uint256 payout = outcomeBalances[msg.sender][mid][winner];
-
-                if (payout > 0) {
-                    outcomeBalances[msg.sender][mid][winner] = 0;
-                    outcomeStakes[msg.sender][mid][winner]   = 0;
-                    _unlockPayout(m.epochId, payout);
-                    total += payout;
-
-                    emit PayoutClaimed(mid, msg.sender, payout);
-                }
-            }
-            unchecked { ++i; }
-        }
-
-        if (total == 0) revert InvalidAmount();
-        baseToken.safeTransfer(msg.sender, total);
-    }
-
     // ─── Void Refunds ─────────────────────────────────────────────────────────
 
     /// @notice Bettors reclaim their exact stake on a voided market.
@@ -1253,36 +1235,6 @@ contract QuadraticMarket is ReentrancyGuard, IQuadraticMarketEvents, IQuadraticM
         baseToken.safeTransfer(msg.sender, stake);
 
         emit PayoutClaimed(marketId, msg.sender, stake);
-    }
-
-    /// @notice Batch void refund across multiple (outcomeId, marketId) pairs.
-    function batchClaimVoidRefund(
-        uint64[] calldata marketIds,
-        uint8[]  calldata outcomeIds
-    ) external nonReentrant whenNotPaused {
-        if (marketIds.length != outcomeIds.length) revert InvalidAmount();
-
-        uint256 len   = marketIds.length;
-        uint256 total = 0;
-
-        for (uint256 i = 0; i < len; ) {
-            uint64 mid = marketIds[i];
-            uint8  oid = outcomeIds[i];
-
-            if (markets[mid].status == MarketStatus.Voided) {
-                uint256 stake = outcomeStakes[msg.sender][mid][oid];
-                if (stake > 0) {
-                    outcomeStakes[msg.sender][mid][oid]   = 0;
-                    outcomeBalances[msg.sender][mid][oid] = 0;
-                    total += stake;
-                    emit PayoutClaimed(mid, msg.sender, stake);
-                }
-            }
-            unchecked { ++i; }
-        }
-
-        if (total == 0) revert InvalidAmount();
-        baseToken.safeTransfer(msg.sender, total);
     }
 
     // ─── Phase 4 internal helper ──────────────────────────────────────────────
@@ -1325,5 +1277,337 @@ contract QuadraticMarket is ReentrancyGuard, IQuadraticMarketEvents, IQuadraticM
 
         emit MarketFinalized(marketId, winningOutcome);
         emit MarketStatusChanged(marketId, MarketStatus.Settled);
+    }
+
+    // ─── Phase 5 — Multi-Leg Bet Slips (Tokenised) ───────────────────────────
+    //
+    // A bet slip is a multi-leg accumulator: all legs must win for payout.
+    // The slip is a transferable token: slipOwner[slipId] holds the claim right.
+    // This enables a P2P secondary marketplace (Phase 6) where bettors can sell
+    // slips mid-event — before results are finalised.
+    //
+    // Odds math (applied at placement, locked):
+    //   rawCombined  = product(leg.odds) / ODDS_PRECISION^(n-1)
+    //   margined     = rawCombined × (BPS - slipHouseMarginBps) / BPS
+    //   discounted   = margined  × discountBps / BPS          (correlation penalty)
+    //   bonused      = discounted × (BPS + crossBonusBps) / BPS (cross-match reward)
+    //   potentialPayout = totalStake × bonused / ODDS_PRECISION
+    //
+    // V1 void rule: if ANY leg's market is voided → full stake refund.
+    //               "Voided leg = 1× multiplier" upgrade planned for V2.
+
+    // ─── Slip Token Ownership ─────────────────────────────────────────────────
+
+    /// @dev Revert if msg.sender is not the slip owner, single approved address,
+    ///      or an operator approved by the current owner.
+    function _requireSlipAuth(uint64 slipId) internal view {
+        address owner = slipOwner[slipId];
+        if (owner == address(0)) revert InvalidMarketStatus(); // slip doesn't exist
+        if (msg.sender == owner)                          return;
+        if (msg.sender == slipApproved[slipId])           return;
+        if (slipOperatorApprovals[owner][msg.sender])     return;
+        revert Unauthorized();
+    }
+
+    /// @notice Approve a single address to transfer a specific slip.
+    ///         Clears on transfer. Caller must be current owner.
+    function approveSlip(uint64 slipId, address approved) external {
+        if (slipOwner[slipId] != msg.sender) revert Unauthorized();
+        slipApproved[slipId] = approved;
+        emit SlipApproved(slipId, msg.sender, approved);
+    }
+
+    /// @notice Grant or revoke an operator's rights over ALL caller's slips.
+    ///         Designed for the Phase 6 marketplace contract to manage listings.
+    function setSlipOperator(address operator, bool approved) external {
+        slipOperatorApprovals[msg.sender][operator] = approved;
+        emit SlipOperatorSet(msg.sender, operator, approved);
+    }
+
+    /// @notice Transfer slip ownership. Caller must be owner, approved, or operator.
+    ///         Clears the per-slip approval on transfer (standard ERC721 behaviour).
+    function transferSlip(uint64 slipId, address to) external {
+        _requireSlipAuth(slipId);
+        if (to == address(0)) revert InvalidAmount(); // no burning
+
+        // Slip must still be active — claimed/cancelled slips have no value
+        SlipStatus s = betSlips[slipId].status;
+        if (s != SlipStatus.Active) revert InvalidMarketStatus();
+
+        address from = slipOwner[slipId];
+        slipOwner[slipId]    = to;
+        slipApproved[slipId] = address(0); // clear single approval
+        emit SlipTransferred(slipId, from, to);
+    }
+
+    // ─── Place Slip ───────────────────────────────────────────────────────────
+
+    /// @notice Place a multi-leg accumulator bet.
+    ///         All legs must be in the same epoch and their markets must be Open
+    ///         and not yet started (same pre-start gate as buyAtOdds).
+    ///         Returns the newly minted slipId.
+    ///
+    /// @param p  PlaceSlipParams: legs[], numLegs, totalStake, minCombinedOdds
+    function placeSlip(
+        PlaceSlipParams calldata p
+    ) external nonReentrant whenNotPaused returns (uint64 slipId) {
+        if (epochPaused)                          revert ProtocolIsPaused();
+        if (p.numLegs < 1 || p.numLegs > MAX_SLIP_LEGS) revert InvalidOutcomeId();
+        if (p.totalStake == 0 || p.totalStake > maxSingleBet) revert InvalidAmount();
+
+        // ── Step 1: validate legs, lock odds, gather discount inputs ──────────
+        uint256  combinedOdds = ODDS_PRECISION; // running product (1.0 identity)
+        uint64   epochId      = 0;
+
+        // Memory arrays for LibGroupDiscount inputs
+        uint64[]    memory groupIds   = new uint64[](p.numLegs);
+        GroupType[] memory groupTypes = new GroupType[](p.numLegs);
+        bool[]      memory hasGroups  = new bool[](p.numLegs);
+
+        BetSlip storage slip = betSlips[nextSlipId + 1]; // pre-allocate (id assigned below)
+
+        for (uint8 i = 0; i < p.numLegs; ) {
+            PlaceSlipLeg calldata leg = p.legs[i];
+            Market storage m = markets[leg.marketId];
+
+            // Market must exist, be Open, and not yet started
+            _requireOpen(leg.marketId);
+            _requireNotStarted(leg.marketId);
+
+            if (leg.outcomeId >= m.numOutcomes) revert InvalidOutcomeId();
+
+            // All legs must share the same epoch (V1 constraint)
+            if (i == 0) {
+                epochId = m.epochId;
+            } else if (m.epochId != epochId) {
+                revert EpochNotInitialized(); // cross-epoch slip rejected
+            }
+
+            uint256 odds = m.currentOdds[leg.outcomeId];
+            if (odds < leg.minOdds) revert OddsSlippageExceeded(); // per-leg guard
+
+            // Accumulate combined odds: running × odds / PRECISION
+            combinedOdds = (combinedOdds * odds) / ODDS_PRECISION;
+
+            // Store locked leg in storage
+            slip.legs[i] = SlipLeg({
+                marketId:  leg.marketId,
+                outcomeId: leg.outcomeId,
+                odds:      odds
+            });
+
+            // Gather group data for discount engine
+            hasGroups[i]  = (m.groupId != 0);
+            groupIds[i]   = m.groupId;
+            groupTypes[i] = m.marketType; // GroupType lives on Market, not MarketGroup
+
+            unchecked { ++i; }
+        }
+
+        // ── Step 2: apply house margin + correlation discount + cross bonus ────
+        uint256 margined = slipHouseMarginBps > 0
+            ? (combinedOdds * (BPS - slipHouseMarginBps)) / BPS
+            : combinedOdds;
+
+        uint256 discountBps = LibGroupDiscount.computeSlipDiscountBps(
+            groupIds, groupTypes, hasGroups, p.numLegs
+        );
+        uint256 discounted = (margined * discountBps) / BPS;
+
+        uint256 crossBonus = LibGroupDiscount.crossMatchBonusBps(
+            groupIds, hasGroups, p.numLegs,
+            crossMatchBonusPerPairBps,   // existing storage var
+            maxSlipBonusMultiplierBps    // existing storage var (cap)
+        );
+        uint256 finalOdds = crossBonus > 0
+            ? (discounted * (BPS + crossBonus)) / BPS
+            : discounted;
+
+        // Final combined-odds slippage guard
+        if (finalOdds < p.minCombinedOdds) revert OddsSlippageExceeded();
+        if (finalOdds < LibOdds.MIN_ODDS)   revert OddsBelowMinimum();
+
+        // ── Step 3: compute payout and check LP exposure cap ──────────────────
+        uint256 potentialPayout = (p.totalStake * finalOdds) / ODDS_PRECISION;
+        _checkEpochExposure(epochId, potentialPayout);
+
+        // ── Step 4: execute — transfer stake, mint slip, lock payout ──────────
+        baseToken.safeTransferFrom(msg.sender, address(this), p.totalStake);
+
+        unchecked { slipId = ++nextSlipId; }
+
+        // Populate the BetSlip struct (legs already written above via pre-alloc ref)
+        slip.slipId          = slipId;
+        slip.creator         = msg.sender;
+        slip.epochId         = epochId;
+        slip.numLegs         = p.numLegs;
+        slip.totalStake      = p.totalStake;
+        slip.combinedOdds    = finalOdds;
+        slip.houseMarginBps  = slipHouseMarginBps;
+        slip.discountBps     = discountBps;
+        slip.crossBonusBps   = crossBonus;
+        slip.potentialPayout = potentialPayout;
+        slip.status          = SlipStatus.Active;
+        slip.createdAt       = block.timestamp;
+
+        // Mint token — placer is first owner
+        slipOwner[slipId]    = msg.sender;
+        slipApproved[slipId] = address(0);
+
+        // Lock the potential payout in the epoch pool
+        _lockPayout(epochId, potentialPayout);
+
+        emit SlipPlaced(slipId, msg.sender, p.numLegs, p.totalStake, potentialPayout);
+    }
+
+    // ─── Slip Settlement View ─────────────────────────────────────────────────
+
+    /// @notice Returns the current settlement status of a slip from on-chain state.
+    ///
+    /// @return pending  True if at least one leg has not yet reached a terminal status
+    /// @return won      True if every leg settled on the bettor's chosen outcome
+    /// @return hasVoid  True if at least one leg's market is voided
+    /// @return hasLost  True if at least one leg settled on the wrong outcome
+    function slipResult(uint64 slipId)
+        public
+        view
+        returns (bool pending, bool won, bool hasVoid, bool hasLost)
+    {
+        BetSlip storage slip = betSlips[slipId];
+        uint8 numLegs = slip.numLegs;
+        for (uint8 i = 0; i < numLegs; ) {
+            SlipLeg storage leg = slip.legs[i];
+            Market  storage m   = markets[leg.marketId];
+            if      (m.status == MarketStatus.Voided)  { hasVoid = true; }
+            else if (m.status == MarketStatus.Settled)  {
+                if (m.winningOutcome != leg.outcomeId) hasLost = true;
+            } else { pending = true; }
+            unchecked { ++i; }
+        }
+        won = !pending && !hasVoid && !hasLost;
+    }
+
+    // ─── Claim Slip Payout ────────────────────────────────────────────────────
+
+    /// @notice Current slip owner (or their approved / operator) claims the payout
+    ///         after all legs win. Payout is sent to the current owner — not the
+    ///         original creator — enabling secondary-market settlement.
+    ///
+    /// @param slipId  The winning slip to claim
+    function claimSlipPayout(uint64 slipId) external nonReentrant whenNotPaused {
+        _requireSlipAuth(slipId);
+
+        BetSlip storage slip = betSlips[slipId];
+        if (slip.status != SlipStatus.Active) revert MarketNotSettled();
+
+        (bool pending, bool won, bool hasVoid, bool hasLost) = slipResult(slipId);
+
+        if (hasLost)  revert InvalidMarketStatus(); // slip lost — nothing to claim
+        if (hasVoid)  revert MarketNotVoidable();   // use claimSlipVoidRefund instead
+        if (pending)  revert ChallengeWindowActive(); // not all legs settled yet
+        if (!won)     revert InvalidMarketStatus();
+
+        uint256 payout = slip.potentialPayout;
+        slip.status = SlipStatus.Claimed;
+
+        address owner = slipOwner[slipId];
+        slipOwner[slipId]    = address(0); // burn ownership (slip is spent)
+        slipApproved[slipId] = address(0);
+
+        // Release LP payout reservation
+        _unlockPayout(slip.epochId, payout);
+
+        baseToken.safeTransfer(owner, payout);
+        emit SlipClaimed(slipId, owner, payout);
+    }
+
+    // ─── Claim Slip Void Refund ───────────────────────────────────────────────
+
+    /// @notice Current slip owner claims a full stake refund if any leg is voided.
+    ///         V1 void rule: one void = full refund, slip cancelled.
+    ///         Callable by current owner / approved / operator.
+    ///
+    ///         Note: if the slip is already known to be a loser (hasLost = true),
+    ///         this reverts — a losing slip can't be refunded just because a leg
+    ///         also happened to be voided.
+    ///
+    /// @param slipId  The slip with at least one voided leg
+    function claimSlipVoidRefund(uint64 slipId) external nonReentrant whenNotPaused {
+        _requireSlipAuth(slipId);
+
+        BetSlip storage slip = betSlips[slipId];
+        if (slip.status != SlipStatus.Active) revert InvalidMarketStatus();
+
+        (, , bool hasVoid, bool hasLost) = slipResult(slipId);
+
+        if (!hasVoid)  revert MarketNotVoidable();    // no voided leg, nothing to refund
+        if (hasLost)   revert InvalidMarketStatus();  // lost slip — no refund
+
+        uint256 stake = slip.totalStake;
+        slip.status = SlipStatus.Cancelled;
+
+        address owner = slipOwner[slipId];
+        slipOwner[slipId]    = address(0);
+        slipApproved[slipId] = address(0);
+
+        // Release the full potential payout reservation from the epoch pool
+        _unlockPayout(slip.epochId, slip.potentialPayout);
+
+        baseToken.safeTransfer(owner, stake);
+        emit SlipVoidRefund(slipId, owner, stake);
+    }
+
+    // ─── Cancel Slip (pre-start only) ─────────────────────────────────────────
+
+    /// @notice Owner can cancel a slip and recover stake only if none of the
+    ///         legs' markets have started yet (equivalent to "bet void before kick-off").
+    ///         Once ANY market has started, the slip is locked in.
+    ///
+    /// @param slipId  The active slip to cancel
+    function cancelSlip(uint64 slipId) external nonReentrant whenNotPaused {
+        _requireSlipAuth(slipId);
+
+        BetSlip storage slip = betSlips[slipId];
+        if (slip.status != SlipStatus.Active) revert InvalidMarketStatus();
+
+        // All markets must be pre-start for a cancel to be permitted
+        uint8 numLegs = slip.numLegs;
+        for (uint8 i = 0; i < numLegs; ) {
+            if (block.timestamp >= markets[slip.legs[i].marketId].startTime) {
+                revert MarketAlreadyStarted(); // too late — at least one match started
+            }
+            unchecked { ++i; }
+        }
+
+        uint256 stake = slip.totalStake;
+        slip.status = SlipStatus.Cancelled;
+
+        address owner = slipOwner[slipId];
+        slipOwner[slipId]    = address(0);
+        slipApproved[slipId] = address(0);
+
+        _unlockPayout(slip.epochId, slip.potentialPayout);
+
+        baseToken.safeTransfer(owner, stake);
+        emit SlipCancelled(slipId, owner);
+    }
+
+    // ─── Phase 5 config admin ─────────────────────────────────────────────────
+    // Slip params live in the main storage block:
+    //   slipHouseMarginBps         — margin per slip leg
+    //   crossMatchBonusPerPairBps  — cross-match bonus per independent pair
+    //   maxSlipBonusMultiplierBps  — cap on cross-match bonus
+
+    /// @notice Admin: update multi-leg slip odds parameters in one call.
+    ///         Uses type(uint256).max as "leave unchanged" sentinel (same as updateConfig).
+    function updateSlipConfig(
+        uint256 newSlipMarginBps,
+        uint256 newCrossBonusPerPairBps,
+        uint256 newMaxCrossBonusBps
+    ) external onlyAdmin {
+        uint256 MAX = type(uint256).max;
+        if (newSlipMarginBps        != MAX) slipHouseMarginBps           = newSlipMarginBps;
+        if (newCrossBonusPerPairBps != MAX) crossMatchBonusPerPairBps    = newCrossBonusPerPairBps;
+        if (newMaxCrossBonusBps     != MAX) maxSlipBonusMultiplierBps    = newMaxCrossBonusBps;
     }
 }

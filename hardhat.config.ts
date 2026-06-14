@@ -11,7 +11,14 @@ export default defineConfig({
           viaIR: true,
           optimizer: {
             enabled: true,
-            runs: 200,
+            // runs=1 → smallest bytecode. The contract is intentionally large
+            // (Phases 1-5); Phase 6 marketplace is a separate contract which
+            // naturally splits the surface area. For mainnet L1 use a UUPS proxy.
+            runs: 1,
+          },
+          metadata: {
+            // Strip IPFS hash from deployed bytecode (saves 33 bytes — counts toward limit).
+            bytecodeHash: "none",
           },
         },
       },
@@ -21,7 +28,10 @@ export default defineConfig({
           viaIR: true,
           optimizer: {
             enabled: true,
-            runs: 200,
+            runs: 1,
+          },
+          metadata: {
+            bytecodeHash: "none",
           },
         },
       },

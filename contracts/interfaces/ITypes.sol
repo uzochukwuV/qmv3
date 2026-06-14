@@ -159,27 +159,48 @@ struct Epoch {
     uint8    winningSportCategory;     // SportCategory with most vote-weight this epoch
 }
 
-/// @notice One leg of a multi-market bet slip.
+/// @notice One leg stored inside a placed BetSlip (locked at placement time).
 struct SlipLeg {
     uint64  marketId;
     uint8   outcomeId;
-    uint256 stake;           // base-token amount staked on this leg
-    uint256 odds;            // odds at placement (× ODDS_PRECISION); locked at bet time
+    uint256 odds;            // odds × ODDS_PRECISION, locked at bet placement
+}
+
+/// @notice Input descriptor for one leg when calling placeSlip.
+struct PlaceSlipLeg {
+    uint64  marketId;
+    uint8   outcomeId;
+    uint256 minOdds;         // per-leg slippage guard — reverts if current odds < this
+}
+
+/// @notice Full input for placeSlip (avoids stack-too-deep on many params).
+struct PlaceSlipParams {
+    PlaceSlipLeg[MAX_SLIP_LEGS] legs;
+    uint8   numLegs;
+    uint256 totalStake;         // single USDC amount staked on the whole accumulator
+    uint256 minCombinedOdds;    // overall slippage guard on final combined odds
 }
 
 /// @notice Multi-leg accumulator bet. All legs must win for payout.
+///
+/// Tokenization: ownership is tracked by slipOwner[slipId] in the main contract,
+/// NOT by `creator`. The current owner receives the payout, not the original placer.
+/// Ownership can be transferred via transferSlip / approveSlip / setSlipOperator,
+/// making the slip a tradeable instrument in the Phase 6 P2P marketplace.
+///
+/// Void rule (V1): if ANY leg's market is voided, slip is refunded in full.
 struct BetSlip {
     uint64      slipId;
-    address     creator;
+    address     creator;         // original placer (historical record only)
+    uint64      epochId;         // all legs belong to this epoch
     SlipLeg[MAX_SLIP_LEGS] legs;
     uint8       numLegs;
     uint256     totalStake;
-    uint256     combinedOdds;     // product of all leg odds (× ODDS_PRECISION)
-    uint256     houseMarginBps;   // margin applied at placement
-    uint256     potentialPayout;  // stake × combinedOdds / ODDS_PRECISION
-    uint256     discountBps;      // parlay correlation discount applied
-    uint256     lockedAmount;     // LP-backed bonus gap reserved for this slip
-    bool        claimed;
+    uint256     combinedOdds;    // final odds after margin + discount + cross-match bonus
+    uint256     houseMarginBps;  // margin captured at placement
+    uint256     discountBps;     // correlation discount applied (FULL_BPS = 10_000 = no discount)
+    uint256     crossBonusBps;   // cross-match bonus applied
+    uint256     potentialPayout; // totalStake × combinedOdds / ODDS_PRECISION
     SlipStatus  status;
     uint256     createdAt;
 }
@@ -277,8 +298,13 @@ interface IQuadraticMarketEvents {
         uint256 totalStake,
         uint256 potentialPayout
     );
-    event SlipClaimed(uint64 indexed slipId, address indexed creator, uint256 payout);
-    event SlipCancelled(uint64 indexed slipId, address indexed creator);
+    event SlipClaimed(uint64 indexed slipId, address indexed owner, uint256 payout);
+    event SlipCancelled(uint64 indexed slipId, address indexed owner);
+    event SlipVoidRefund(uint64 indexed slipId, address indexed owner, uint256 refund);
+    // Slip token events (ERC721-like transfer primitives for P2P marketplace)
+    event SlipTransferred(uint64 indexed slipId, address indexed from, address indexed to);
+    event SlipApproved(uint64 indexed slipId, address indexed owner, address indexed approved);
+    event SlipOperatorSet(address indexed owner, address indexed operator, bool approved);
 
     // Settlement
     event ResultProposed(uint64 indexed marketId, uint8 outcome, address indexed oracle);
