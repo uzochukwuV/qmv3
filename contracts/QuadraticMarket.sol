@@ -4,6 +4,8 @@ pragma solidity ^0.8.28;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 
 import "./interfaces/ITypes.sol";
 import "./libraries/LibOdds.sol";
@@ -413,7 +415,7 @@ contract QuadraticMarket is ReentrancyGuard, IQuadraticMarketEvents, IQuadraticM
         if (amount == 0) revert InvalidAmount();
 
         Epoch storage ep = epochs[currentEpoch];
-        if (!ep.initialized) revert EpochAlreadyInitialized();
+        if (!ep.initialized) revert EpochNotInitialized();
 
         // Deposit window: only before epoch starts (trading begins at startTime)
         if (block.timestamp >= ep.startTime) revert EpochLiquidityGated();
@@ -690,5 +692,352 @@ contract QuadraticMarket is ReentrancyGuard, IQuadraticMarketEvents, IQuadraticM
     /// @notice Whether an address is admin or operator.
     function isAuthorized(address account) external view returns (bool) {
         return _isAuthorized(account);
+    }
+
+    // ─── Phase 3 — Market Creation, Oracle Odds, Single Bets ─────────────────
+    //
+    // Pre-epoch window timeline (from user spec):
+    //   1. Admin calls initEpoch(epochStartTime, multiplierBps)
+    //   2. Admin calls createMarketGroup + createMarket → status = PreOpen
+    //      LPs can now see the full card of events before depositing capital
+    //   3. LPs call addLiquidity / voteCategory
+    //   4. epochStartTime passes → admin calls bulkOpenMarkets → status = Open
+    //   5. Bettors call buyAtOdds (with minOdds slippage guard)
+    //   6. Oracle calls updateOdds (signed) as lines move pre-match
+    //   7. market.startTime passes → AwaitingResult, oracle settles
+    //   8. voidIfExpired is permissionless safety net if oracle goes silent
+
+    // ─── Market Group ─────────────────────────────────────────────────────────
+
+    /// @notice Create a new MarketGroup (the real-world event / match).
+    ///         All markets within a group share a same-match parlay correlation discount.
+    ///         Call this during the pre-epoch deposit window so LPs see the full card.
+    ///
+    /// @param title            e.g. "Arsenal vs Chelsea — Jun 14 2026"
+    /// @param eventStartTime   Informational — when the event kicks off
+    /// @param maxGroupExposure LP-backed payout cap for this event (0 = maxMarketExposure)
+    function createMarketGroup(
+        string   calldata title,
+        uint256  eventStartTime,
+        uint256  maxGroupExposure
+    ) external onlyAuthorized returns (uint64 groupId) {
+        if (!epochs[currentEpoch].initialized) revert EpochNotInitialized();
+
+        groupId = _nextGroupId();
+
+        MarketGroup storage mg = marketGroups[groupId];
+        mg.groupId          = groupId;
+        mg.creator          = msg.sender;
+        mg.title            = title;
+        mg.eventStartTime   = eventStartTime;
+        mg.maxGroupExposure = maxGroupExposure > 0 ? maxGroupExposure : maxMarketExposure;
+        mg.numMarkets       = 0;
+        mg.exists           = true;
+
+        emit MarketGroupCreated(groupId, title, eventStartTime);
+    }
+
+    /// @notice Create an individual betting market (PreOpen) inside a MarketGroup.
+    ///         Status is PreOpen until openMarket() is called once the epoch starts.
+    ///
+    ///         The oddsAnchor array must carry a valid oracle ECDSA signature proving
+    ///         the prices come from an external source (Pinnacle / The Odds API).
+    ///         The anchor is immutable after creation — updateOdds cannot drift beyond
+    ///         `maxDeviationBps` from it, so LPs know the worst-case price swing.
+    function createMarket(CreateMarketParams calldata p) external onlyAuthorized returns (uint64 marketId) {
+        Epoch storage ep = epochs[currentEpoch];
+        if (!ep.initialized)                                   revert EpochNotInitialized();
+        if (p.numOutcomes < 2 || p.numOutcomes > MAX_OUTCOMES) revert InvalidNumOutcomes();
+        if (p.startTime <= block.timestamp)                    revert InvalidAmount();
+
+        // Verify oracle signed the odds anchor
+        _verifyCreateMarketSig(p);
+
+        marketId = _nextMarketId();
+        Market storage m = markets[marketId];
+
+        m.marketId        = marketId;
+        m.creator         = msg.sender;
+        m.startTime       = p.startTime;
+        m.status          = MarketStatus.PreOpen;
+        m.numOutcomes     = p.numOutcomes;
+        m.marketType      = p.marketType;
+        m.category        = p.category;
+        m.title           = p.title;
+        m.description     = p.description;
+        m.epochId         = currentEpoch;
+        m.groupId         = p.groupId;
+        m.hasGroup        = p.groupId != 0;
+        m.maxDeviationBps = p.maxDeviationBps > 0 ? p.maxDeviationBps : 1_000; // 10% default
+
+        uint256 autoVol = _autoVolumeCap(ep, p.numOutcomes);
+        for (uint8 i = 0; i < p.numOutcomes; ) {
+            if (p.oddsAnchor[i] < LibOdds.MIN_ODDS) revert OddsBelowMinimum();
+            m.oddsAnchor[i]   = p.oddsAnchor[i];
+            m.currentOdds[i]  = p.oddsAnchor[i];
+            m.volumeCap[i]    = p.volumeCap[i] > 0 ? p.volumeCap[i] : autoVol;
+            unchecked { ++i; }
+        }
+        m.oddsLastUpdated = block.timestamp;
+
+        // Register in group
+        if (m.hasGroup) {
+            MarketGroup storage mg = marketGroups[p.groupId];
+            if (!mg.exists)                     revert GroupNotFound();
+            if (mg.numMarkets >= MAX_GROUP_MKTS) revert GroupFull();
+            m.groupMarketIndex          = mg.numMarkets;
+            mg.marketIds[mg.numMarkets] = marketId;
+            unchecked { ++mg.numMarkets; }
+            emit MarketAddedToGroup(p.groupId, marketId, m.groupMarketIndex);
+        }
+
+        // Register in epoch — flip allMarketsSettled to false (epoch now has live markets)
+        unchecked { ++ep.numMarkets; }
+        ep.allMarketsSettled = false;
+
+        emit MarketCreated(marketId, p.groupId, p.marketType, p.title, p.startTime);
+    }
+
+    /// @notice Flip a single PreOpen market to Open.
+    ///         Requires epoch.startTime to have passed — ensures LPs had the full
+    ///         deposit window to see the market before it accepts bets.
+    function openMarket(uint64 marketId) public onlyAuthorized {
+        Market storage m = markets[marketId];
+        if (m.marketId == 0 || m.status != MarketStatus.PreOpen) revert InvalidMarketStatus();
+
+        Epoch storage ep = epochs[m.epochId];
+        if (!ep.initialized)              revert EpochNotInitialized();
+        if (block.timestamp < ep.startTime) revert EpochLiquidityGated();
+
+        m.status = MarketStatus.Open;
+        emit MarketStatusChanged(marketId, MarketStatus.Open);
+    }
+
+    /// @notice Batch-open multiple PreOpen markets in one transaction.
+    ///         Silently skips any market that is not PreOpen or whose epoch hasn't started.
+    function bulkOpenMarkets(uint64[] calldata marketIds) external onlyAuthorized {
+        uint256 len = marketIds.length;
+        for (uint256 i = 0; i < len; ) {
+            uint64 mid = marketIds[i];
+            Market storage m = markets[mid];
+            if (m.marketId != 0 && m.status == MarketStatus.PreOpen) {
+                Epoch storage ep = epochs[m.epochId];
+                if (ep.initialized && block.timestamp >= ep.startTime) {
+                    m.status = MarketStatus.Open;
+                    emit MarketStatusChanged(mid, MarketStatus.Open);
+                }
+            }
+            unchecked { ++i; }
+        }
+    }
+
+    /// @notice Suspend betting on a market (live incident, lineup news, etc.).
+    function suspendMarket(uint64 marketId) external onlyAuthorized {
+        Market storage m = markets[marketId];
+        if (m.status != MarketStatus.Open) revert InvalidMarketStatus();
+        m.status = MarketStatus.Suspended;
+        emit MarketStatusChanged(marketId, MarketStatus.Suspended);
+    }
+
+    /// @notice Reopen a suspended market.
+    function resumeMarket(uint64 marketId) external onlyAuthorized {
+        Market storage m = markets[marketId];
+        if (m.status != MarketStatus.Suspended) revert InvalidMarketStatus();
+        m.status = MarketStatus.Open;
+        emit MarketStatusChanged(marketId, MarketStatus.Open);
+    }
+
+    // ─── Oracle Odds Updates ──────────────────────────────────────────────────
+
+    /// @notice Update market odds via oracle-signed payload.
+    ///         Only callable before market.startTime (match kick-off).
+    ///         Each new odds value is validated against the creation-time anchor
+    ///         via LibOdds.withinDeviation — the oracle cannot shade lines beyond
+    ///         `maxDeviationBps` from the anchor, protecting LP from mispricing.
+    ///
+    /// @param marketId    Target market
+    /// @param newOdds     Replacement odds for each outcome (× ODDS_PRECISION); unused
+    ///                    slots (beyond numOutcomes) are ignored
+    /// @param sigDeadline Oracle sig expires at this timestamp (prevents replay)
+    /// @param sig         Oracle ECDSA signature
+    function updateOdds(
+        uint64                       marketId,
+        uint256[MAX_OUTCOMES] calldata newOdds,
+        uint256                      sigDeadline,
+        bytes calldata               sig
+    ) external onlyAuthorized {
+        if (block.timestamp > sigDeadline) revert ChallengeWindowExpired();
+
+        Market storage m = markets[marketId];
+        if (m.marketId == 0) revert InvalidMarketStatus();
+        if (m.status != MarketStatus.Open && m.status != MarketStatus.PreOpen) {
+            revert InvalidMarketStatus();
+        }
+        if (block.timestamp >= m.startTime) revert MarketAlreadyStarted();
+
+        // Verify oracle ECDSA signature covers (prefix, chainId, contract, marketId, odds, deadline)
+        bytes32 msgHash = keccak256(abi.encodePacked(
+            "QM:updateOdds",
+            block.chainid,
+            address(this),
+            marketId,
+            newOdds,
+            sigDeadline
+        ));
+        address signer = ECDSA.recover(MessageHashUtils.toEthSignedMessageHash(msgHash), sig);
+        if (signer != oracle) revert InvalidOracleSignature();
+
+        // Apply per-outcome — validate deviation from anchor before writing
+        for (uint8 i = 0; i < m.numOutcomes; ) {
+            if (newOdds[i] < LibOdds.MIN_ODDS) revert OddsBelowMinimum();
+            if (!LibOdds.withinDeviation(newOdds[i], m.oddsAnchor[i], m.maxDeviationBps)) {
+                revert OddsDeviationExceeded();
+            }
+            m.currentOdds[i] = newOdds[i];
+            unchecked { ++i; }
+        }
+        m.oddsLastUpdated = block.timestamp;
+
+        emit OddsUpdated(marketId, newOdds, block.timestamp);
+    }
+
+    // ─── Single-Outcome Bet ───────────────────────────────────────────────────
+
+    /// @notice Place a single-outcome bet at current oracle odds.
+    ///         The `minOdds` parameter is mandatory — it protects the bettor from
+    ///         front-running: if the oracle updates odds between the bettor signing
+    ///         the tx and it landing on-chain, the bet is rejected rather than filled
+    ///         at a worse price.
+    ///
+    /// @param marketId   Target market
+    /// @param outcomeId  Outcome index to back (0-indexed)
+    /// @param stake      USDC to stake (in base-token units, 6 decimals)
+    /// @param minOdds    Minimum acceptable odds (× ODDS_PRECISION) — tx reverts if
+    ///                   current odds are below this
+    function buyAtOdds(
+        uint64  marketId,
+        uint8   outcomeId,
+        uint256 stake,
+        uint256 minOdds
+    ) external nonReentrant whenNotPaused {
+        if (epochPaused)                        revert ProtocolIsPaused();
+        if (stake == 0 || stake > maxSingleBet) revert InvalidAmount();
+
+        Market storage m = markets[marketId];
+        _requireOpen(marketId);
+        _requireNotStarted(marketId);
+
+        if (outcomeId >= m.numOutcomes) revert InvalidOutcomeId();
+
+        uint256 odds = m.currentOdds[outcomeId];
+
+        // Slippage guard — non-negotiable (Claude2.md front-running scenario)
+        if (odds < minOdds) revert OddsSlippageExceeded();
+
+        // Deduct buy fee from stake before computing payout
+        uint256 effectiveStake = buyFeeBps > 0
+            ? (stake * (BPS - buyFeeBps)) / BPS
+            : stake;
+
+        uint256 payout = LibOdds.computePayout(effectiveStake, odds);
+
+        // Per-outcome volume cap (limits single-outcome LP liability)
+        if (!LibOdds.withinVolumeCap(m.volumeFilled[outcomeId], m.volumeCap[outcomeId], payout)) {
+            revert VolumeCapExceeded();
+        }
+
+        // Epoch-level exposure cap (total locked payouts ≤ LP deposit × multiplier)
+        _checkEpochExposure(m.epochId, payout);
+
+        // ── All checks passed — execute ────────────────────────────────────────
+        baseToken.safeTransferFrom(msg.sender, address(this), stake);
+
+        // Outcome shares are redeemable 1:1 in payout units if the outcome wins
+        outcomeBalances[msg.sender][marketId][outcomeId] += payout;
+
+        // Accounting
+        m.volumeFilled[outcomeId] += payout;
+        m.lockedPayout            += payout;
+        m.backing                 += stake;
+        _lockPayout(m.epochId, payout);
+
+        emit BetPlaced(marketId, msg.sender, outcomeId, stake, odds, payout);
+    }
+
+    // ─── Permissionless Safety Net ────────────────────────────────────────────
+
+    /// @notice Void a market if the oracle has not settled it within
+    ///         `settlementDeadlineSeconds` after market.startTime.
+    ///         Permissionless — any address can call this.
+    ///         On void: all stakes are refundable via claimVoidRefund (Phase 4),
+    ///         and the locked payouts are released back to free LP liquidity.
+    function voidIfExpired(uint64 marketId) external {
+        Market storage m = markets[marketId];
+        if (m.marketId == 0)                      revert InvalidMarketStatus();
+        if (m.status == MarketStatus.Settled)      revert MarketAlreadySettled();
+        if (m.status == MarketStatus.Voided)       revert MarketAlreadySettled();
+
+        // Must be past the settlement deadline
+        if (block.timestamp < m.startTime + settlementDeadlineSeconds) {
+            revert SettlementDeadlineNotPassed();
+        }
+
+        // Only live/suspended/awaiting markets can be expired
+        if (m.status == MarketStatus.Settled || m.status == MarketStatus.Voided) {
+            revert MarketAlreadySettled();
+        }
+
+        m.status = MarketStatus.Voided;
+
+        // Release locked payouts back to free liquidity
+        _unlockPayout(m.epochId, m.lockedPayout);
+        m.lockedPayout = 0;
+
+        // Advance epoch settlement counter
+        Epoch storage ep = epochs[m.epochId];
+        unchecked { ++ep.numSettledMarkets; }
+        if (ep.numSettledMarkets >= ep.numMarkets) {
+            ep.allMarketsSettled = true;
+        }
+
+        emit MarketStatusChanged(marketId, MarketStatus.Voided);
+    }
+
+    // ─── Phase 3 internal helpers ─────────────────────────────────────────────
+
+    /// @dev Verify oracle ECDSA signature for createMarket's oddsAnchor.
+    ///      Signature covers: prefix, chainId, contract, epochId, groupId,
+    ///      numOutcomes, all oddsAnchor values, sigDeadline.
+    ///      Reverts with InvalidOracleSignature if signer ≠ oracle.
+    ///      Reverts with ChallengeWindowExpired if sigDeadline has passed.
+    function _verifyCreateMarketSig(CreateMarketParams calldata p) internal view {
+        if (block.timestamp > p.sigDeadline) revert ChallengeWindowExpired();
+
+        bytes32 msgHash = keccak256(abi.encodePacked(
+            "QM:createMarket",
+            block.chainid,
+            address(this),
+            currentEpoch,
+            p.groupId,
+            p.numOutcomes,
+            p.oddsAnchor,
+            p.sigDeadline
+        ));
+        address signer = ECDSA.recover(
+            MessageHashUtils.toEthSignedMessageHash(msgHash),
+            p.oracleSig
+        );
+        if (signer != oracle) revert InvalidOracleSignature();
+    }
+
+    /// @dev Compute a per-outcome volume cap from the epoch's LP pool when the
+    ///      admin does not specify one explicitly (volumeCap[i] == 0).
+    ///      auto = epochMaxExposure / numOutcomes
+    ///      If no LP has deposited yet, returns maxMarketExposure / numOutcomes
+    ///      as a conservative fallback.
+    function _autoVolumeCap(Epoch storage ep, uint8 numOutcomes) internal view returns (uint256) {
+        uint256 epochMax = LibOdds.maxEpochExposure(ep.totalLiquidityAdded, ep.maxExposureMultiplierBps);
+        if (epochMax == 0) epochMax = maxMarketExposure;
+        return epochMax / numOutcomes;
     }
 }

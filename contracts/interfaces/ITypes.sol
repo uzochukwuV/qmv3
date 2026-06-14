@@ -303,6 +303,23 @@ interface IQuadraticMarketEvents {
     event OrderCancelled(uint64 indexed orderId, address indexed maker);
 }
 
+/// @notice Parameters for creating a new betting market (avoids stack-too-deep).
+///         oddsAnchor must be signed by the oracle to prove external provenance.
+struct CreateMarketParams {
+    uint64      groupId;          // MarketGroup this belongs to (0 = standalone)
+    string      title;            // e.g. "Full-Time Result"
+    string      description;      // extended description
+    uint256     startTime;        // unix timestamp when the event kicks off (bets close here)
+    uint8       numOutcomes;      // 2–8
+    GroupType   marketType;       // FTR / Goals / BTTS / AsianHandicap / …
+    uint8       category;         // uint8(SportCategory)
+    uint256[MAX_OUTCOMES] oddsAnchor;  // reference odds signed by oracle (× ODDS_PRECISION)
+    uint256     maxDeviationBps;  // max oracle drift from anchor (0 → 10% default)
+    uint256[MAX_OUTCOMES] volumeCap;   // per-outcome payout cap (0 → auto from epoch LP pool)
+    uint256     sigDeadline;      // oracle sig expires after this timestamp
+    bytes       oracleSig;        // oracle ECDSA sig over (params + chainId + address(this))
+}
+
 /// @notice Struct passed to updateConfig to avoid stack-too-deep on many params.
 ///         Pass type(uint256).max (or address(type(uint160).max) for oracle) to leave a field unchanged.
 ///         Pass the desired value — including 0 — to update a field.
