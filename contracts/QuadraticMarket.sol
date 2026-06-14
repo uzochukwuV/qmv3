@@ -153,9 +153,15 @@ contract QuadraticMarket is ReentrancyGuard, IQuadraticMarketEvents, IQuadraticM
     /// @notice Pending queued LP deposits (activated next epoch).
     mapping(address => PendingLiquidity) public pendingLiquidity;
 
-    /// @notice Outcome token balances: bettor → marketId → outcomeId → shares.
-    ///         Minted on buyAtOdds, burned on claimPayout / cashOut.
+    /// @notice Outcome payout shares: bettor → marketId → outcomeId → payout units.
+    ///         Minted on buyAtOdds (value = full payout if outcome wins).
+    ///         Burned on claimPayout. Used as the win-claim amount.
     mapping(address => mapping(uint64 => mapping(uint8 => uint256))) public outcomeBalances;
+
+    /// @notice USDC stake per position: bettor → marketId → outcomeId → stake paid.
+    ///         Recorded alongside outcomeBalances so voided markets can refund exact stakes
+    ///         (payout units ≠ stake — they differ by the odds multiplier).
+    mapping(address => mapping(uint64 => mapping(uint8 => uint256))) public outcomeStakes;
 
     /// @notice Per-LP deposit tracking per epoch for NAV calculation.
     mapping(address => mapping(uint64 => uint256)) public lpDepositsPerEpoch;
@@ -952,10 +958,12 @@ contract QuadraticMarket is ReentrancyGuard, IQuadraticMarketEvents, IQuadraticM
         // ── All checks passed — execute ────────────────────────────────────────
         baseToken.safeTransferFrom(msg.sender, address(this), stake);
 
-        // Outcome shares are redeemable 1:1 in payout units if the outcome wins
+        // Outcome shares: redeemable 1:1 in payout units if outcome wins
         outcomeBalances[msg.sender][marketId][outcomeId] += payout;
+        // Stake record: used for exact refunds if market is voided
+        outcomeStakes[msg.sender][marketId][outcomeId]   += stake;
 
-        // Accounting
+        // Market + epoch accounting
         m.volumeFilled[outcomeId] += payout;
         m.lockedPayout            += payout;
         m.backing                 += stake;
@@ -1039,5 +1047,283 @@ contract QuadraticMarket is ReentrancyGuard, IQuadraticMarketEvents, IQuadraticM
         uint256 epochMax = LibOdds.maxEpochExposure(ep.totalLiquidityAdded, ep.maxExposureMultiplierBps);
         if (epochMax == 0) epochMax = maxMarketExposure;
         return epochMax / numOutcomes;
+    }
+
+    // ─── Phase 4 — Settlement Pipeline, Claims, Void Refunds ─────────────────
+    //
+    // Settlement flow:
+    //   1. market.startTime passes → no new bets (enforced in buyAtOdds)
+    //   2. Oracle calls proposeResult(marketId, winningOutcome, deadline, sig)
+    //      → status: Proposed, Dispute record created with challengeDeadline
+    //   3a. If oracle is wrong → admin calls adminOverride(correctedOutcome)
+    //       → immediately finalizes with corrected outcome
+    //   3b. Challenge window passes → anyone calls finalizeResult(marketId)
+    //       → status: Settled, non-winning payouts unlocked back to LP
+    //   4. Winners call claimPayout(marketId) — receives outcomeBalance USDC
+    //   5. If market voided → bettors call claimVoidRefund(marketId, outcomeId)
+    //      — receives exact outcomeStake USDC back
+
+    // ─── Propose Result ───────────────────────────────────────────────────────
+
+    /// @notice Oracle proposes the winning outcome for a market.
+    ///         Opens a challenge window (challengeWindowSeconds) during which the
+    ///         admin can override if the oracle result is incorrect.
+    ///         After the window, anyone calls finalizeResult() to settle.
+    ///
+    /// @param marketId       Market to settle
+    /// @param winningOutcome Proposed winning outcome index
+    /// @param sigDeadline    Signature expiry (prevents stale replays)
+    /// @param sig            Oracle ECDSA signature
+    function proposeResult(
+        uint64 marketId,
+        uint8  winningOutcome,
+        uint256 sigDeadline,
+        bytes calldata sig
+    ) external onlyAuthorized {
+        if (block.timestamp > sigDeadline) revert ChallengeWindowExpired();
+
+        Market storage m = markets[marketId];
+        if (m.marketId == 0) revert InvalidMarketStatus();
+
+        // Market must be past kick-off time
+        if (block.timestamp < m.startTime) revert MarketNotOpen();
+
+        // Accept Open, Suspended, or AwaitingResult (operator may have forgotten to close)
+        if (m.status != MarketStatus.Open        &&
+            m.status != MarketStatus.Suspended   &&
+            m.status != MarketStatus.AwaitingResult) {
+            revert InvalidMarketStatus();
+        }
+
+        if (winningOutcome >= m.numOutcomes) revert InvalidOutcomeId();
+
+        // Verify oracle ECDSA signature
+        bytes32 msgHash = keccak256(abi.encodePacked(
+            "QM:proposeResult",
+            block.chainid,
+            address(this),
+            marketId,
+            winningOutcome,
+            sigDeadline
+        ));
+        address signer = ECDSA.recover(MessageHashUtils.toEthSignedMessageHash(msgHash), sig);
+        if (signer != oracle) revert InvalidOracleSignature();
+
+        m.status         = MarketStatus.Proposed;
+        m.winningOutcome = winningOutcome;
+        m.settlementTime = block.timestamp;
+
+        disputes[marketId] = Dispute({
+            marketId:          marketId,
+            proposedOutcome:   winningOutcome,
+            proposer:          msg.sender,
+            createdAt:         block.timestamp,
+            challengeDeadline: block.timestamp + challengeWindowSeconds,
+            status:            DisputeStatus.Pending
+        });
+
+        emit ResultProposed(marketId, winningOutcome, msg.sender);
+    }
+
+    // ─── Admin Override ───────────────────────────────────────────────────────
+
+    /// @notice Admin corrects an oracle result within the challenge window.
+    ///         Immediately finalizes the market with the corrected outcome —
+    ///         does not require waiting for the challenge window to close.
+    ///         Only callable while block.timestamp < dispute.challengeDeadline.
+    ///
+    /// @param marketId         Market to correct
+    /// @param correctedOutcome The actual winning outcome
+    function adminOverride(uint64 marketId, uint8 correctedOutcome) external onlyAdmin {
+        Market storage m = markets[marketId];
+        if (m.status != MarketStatus.Proposed) revert InvalidMarketStatus();
+        if (correctedOutcome >= m.numOutcomes)  revert InvalidOutcomeId();
+
+        Dispute storage d = disputes[marketId];
+        if (block.timestamp > d.challengeDeadline) revert ChallengeWindowExpired();
+
+        m.winningOutcome  = correctedOutcome;
+        d.proposedOutcome = correctedOutcome;
+        d.status          = DisputeStatus.Overridden;
+
+        emit ResultOverridden(marketId, correctedOutcome, msg.sender);
+
+        // Finalize immediately — no need to wait for the window
+        _finalizeMarket(marketId, correctedOutcome);
+    }
+
+    // ─── Finalize Result ──────────────────────────────────────────────────────
+
+    /// @notice Finalize a market after the oracle challenge window has passed.
+    ///         Permissionless — any address can trigger this.
+    ///         Releases non-winning payout obligations back to free LP liquidity.
+    ///         Winners can then call claimPayout().
+    ///
+    /// @param marketId Market whose challenge window has elapsed
+    function finalizeResult(uint64 marketId) external {
+        Market storage m = markets[marketId];
+        if (m.status != MarketStatus.Proposed) revert InvalidMarketStatus();
+
+        Dispute storage d = disputes[marketId];
+        if (block.timestamp < d.challengeDeadline) revert ChallengeWindowActive();
+
+        d.status = DisputeStatus.Resolved;
+        _finalizeMarket(marketId, m.winningOutcome);
+    }
+
+    // ─── Claim Payout ─────────────────────────────────────────────────────────
+
+    /// @notice Winning bettors claim their USDC payout after a market is settled.
+    ///         Transfers outcomeBalances[caller][marketId][winningOutcome] USDC.
+    ///         Burns the share and decrements the epoch's locked payout counter.
+    ///
+    /// @param marketId The settled market to claim from
+    function claimPayout(uint64 marketId) external nonReentrant whenNotPaused {
+        Market storage m = markets[marketId];
+        if (m.status != MarketStatus.Settled) revert MarketNotSettled();
+
+        uint8   winner = m.winningOutcome;
+        uint256 payout = outcomeBalances[msg.sender][marketId][winner];
+        if (payout == 0) revert InvalidAmount();
+
+        // Zero before transfer — prevents double-claim and reentrancy
+        outcomeBalances[msg.sender][marketId][winner] = 0;
+        outcomeStakes[msg.sender][marketId][winner]   = 0; // cleanup stake record
+
+        // Release this bettor's slice from the epoch-level locked counter
+        _unlockPayout(m.epochId, payout);
+
+        baseToken.safeTransfer(msg.sender, payout);
+
+        emit PayoutClaimed(marketId, msg.sender, payout);
+    }
+
+    /// @notice Batch-claim payouts across multiple markets in one tx.
+    ///         Skips markets where the caller has no winning balance.
+    ///
+    /// @param marketIds Array of settled market IDs to claim from
+    function batchClaimPayout(uint64[] calldata marketIds) external nonReentrant whenNotPaused {
+        uint256 len   = marketIds.length;
+        uint256 total = 0;
+
+        for (uint256 i = 0; i < len; ) {
+            uint64  mid    = marketIds[i];
+            Market storage m = markets[mid];
+
+            if (m.status == MarketStatus.Settled) {
+                uint8   winner = m.winningOutcome;
+                uint256 payout = outcomeBalances[msg.sender][mid][winner];
+
+                if (payout > 0) {
+                    outcomeBalances[msg.sender][mid][winner] = 0;
+                    outcomeStakes[msg.sender][mid][winner]   = 0;
+                    _unlockPayout(m.epochId, payout);
+                    total += payout;
+
+                    emit PayoutClaimed(mid, msg.sender, payout);
+                }
+            }
+            unchecked { ++i; }
+        }
+
+        if (total == 0) revert InvalidAmount();
+        baseToken.safeTransfer(msg.sender, total);
+    }
+
+    // ─── Void Refunds ─────────────────────────────────────────────────────────
+
+    /// @notice Bettors reclaim their exact stake on a voided market.
+    ///         Works for all outcomes (bettor may have backed multiple outcomes).
+    ///         The LP's payout obligation was already released by voidIfExpired
+    ///         or the void path of the settlement pipeline.
+    ///
+    /// @param marketId  The voided market
+    /// @param outcomeId The outcome the caller backed
+    function claimVoidRefund(uint64 marketId, uint8 outcomeId) external nonReentrant whenNotPaused {
+        Market storage m = markets[marketId];
+        if (m.status != MarketStatus.Voided) revert MarketNotVoidable();
+
+        uint256 stake = outcomeStakes[msg.sender][marketId][outcomeId];
+        if (stake == 0) revert InvalidAmount();
+
+        // Clear both records before transfer
+        outcomeStakes[msg.sender][marketId][outcomeId]   = 0;
+        outcomeBalances[msg.sender][marketId][outcomeId] = 0;
+
+        baseToken.safeTransfer(msg.sender, stake);
+
+        emit PayoutClaimed(marketId, msg.sender, stake);
+    }
+
+    /// @notice Batch void refund across multiple (outcomeId, marketId) pairs.
+    function batchClaimVoidRefund(
+        uint64[] calldata marketIds,
+        uint8[]  calldata outcomeIds
+    ) external nonReentrant whenNotPaused {
+        if (marketIds.length != outcomeIds.length) revert InvalidAmount();
+
+        uint256 len   = marketIds.length;
+        uint256 total = 0;
+
+        for (uint256 i = 0; i < len; ) {
+            uint64 mid = marketIds[i];
+            uint8  oid = outcomeIds[i];
+
+            if (markets[mid].status == MarketStatus.Voided) {
+                uint256 stake = outcomeStakes[msg.sender][mid][oid];
+                if (stake > 0) {
+                    outcomeStakes[msg.sender][mid][oid]   = 0;
+                    outcomeBalances[msg.sender][mid][oid] = 0;
+                    total += stake;
+                    emit PayoutClaimed(mid, msg.sender, stake);
+                }
+            }
+            unchecked { ++i; }
+        }
+
+        if (total == 0) revert InvalidAmount();
+        baseToken.safeTransfer(msg.sender, total);
+    }
+
+    // ─── Phase 4 internal helper ──────────────────────────────────────────────
+
+    /// @dev Core settlement logic shared by adminOverride and finalizeResult.
+    ///
+    ///      Accounting on settlement:
+    ///        - Non-winning outcome volumeFilled → unlocked from epoch (LP liability freed)
+    ///        - Winning outcome volumeFilled    → stays locked until winners claim (claimPayout)
+    ///        - m.lockedPayout reduced to winning-only obligation
+    ///        - epoch.numSettledMarkets incremented; allMarketsSettled flipped if complete
+    ///
+    ///      Why unlock non-winners here, not at claim time?
+    ///        LP liquidity is freed as soon as the result is confirmed, not when every
+    ///        individual bettor happens to claim. This maximises LP capital efficiency —
+    ///        freed liquidity can back the next epoch immediately.
+    function _finalizeMarket(uint64 marketId, uint8 winningOutcome) internal {
+        Market storage m = markets[marketId];
+
+        // Release every non-winning outcome's locked payout back to free liquidity
+        uint256 winLiability = m.volumeFilled[winningOutcome];
+        for (uint8 i = 0; i < m.numOutcomes; ) {
+            if (i != winningOutcome && m.volumeFilled[i] > 0) {
+                _unlockPayout(m.epochId, m.volumeFilled[i]);
+            }
+            unchecked { ++i; }
+        }
+
+        // Only winning payouts stay reserved — released per-bettor in claimPayout()
+        m.lockedPayout   = winLiability;
+        m.status         = MarketStatus.Settled;
+        m.winningOutcome = winningOutcome;
+
+        // Epoch settlement tracking
+        Epoch storage ep = epochs[m.epochId];
+        unchecked { ++ep.numSettledMarkets; }
+        if (ep.numSettledMarkets >= ep.numMarkets) {
+            ep.allMarketsSettled = true;
+        }
+
+        emit MarketFinalized(marketId, winningOutcome);
+        emit MarketStatusChanged(marketId, MarketStatus.Settled);
     }
 }
