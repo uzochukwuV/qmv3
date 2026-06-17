@@ -1,57 +1,56 @@
-# Sample Hardhat 3 Project (`node:test` and `viem`)
+# Hardhat Project Guide
 
-This project showcases a Hardhat 3 project using the native Node.js test runner (`node:test`) and the `viem` library for Ethereum interactions.
+This is a Hardhat 3 project using TypeScript, viem, and `@nomicfoundation/hardhat-toolbox-viem`.
 
-To learn more about Hardhat 3, please visit the [Getting Started guide](https://hardhat.org/docs/getting-started#getting-started-with-hardhat-3). To share your feedback, join our [Hardhat 3](https://hardhat.org/hardhat3-telegram-group) Telegram group or [open an issue](https://github.com/NomicFoundation/hardhat/issues/new) in our GitHub issue tracker.
+## Tooling
 
-## Project Overview
+- Hardhat: `^3.9.0`
+- Toolbox: `@nomicfoundation/hardhat-toolbox-viem`
+- TypeScript: `~6.0.3`
+- Solidity compiler: `0.8.28`
+- OpenZeppelin Contracts: `^5.6.1`
+- Base-token assumptions in the contracts target USDC-style 6-decimal ERC20 accounting.
 
-This example project includes:
-
-- A simple Hardhat configuration file.
-- Foundry-compatible Solidity unit tests.
-- TypeScript integration tests using [`node:test`](nodejs.org/api/test.html), the new Node.js native test runner, and [`viem`](https://viem.sh/).
-- Examples demonstrating how to connect to different types of networks, including locally simulating OP mainnet.
-
-## Usage
-
-### Running Tests
-
-To run all the tests in the project, execute the following command:
+## Commands
 
 ```shell
+npm install
+npx hardhat compile
 npx hardhat test
-```
-
-You can also selectively run the Solidity or `node:test` tests:
-
-```shell
-npx hardhat test solidity
 npx hardhat test nodejs
+npx hardhat test solidity
 ```
 
-### Make a deployment to Sepolia
+## Configuration Notes
 
-This project includes an example Ignition module to deploy the contract. You can deploy this module to a locally simulated chain or to Sepolia.
+`hardhat.config.ts` enables:
 
-To run the deployment to a local chain:
+- `viaIR: true`
+- optimizer enabled with `runs: 1`
+- `metadata.bytecodeHash: "none"`
+- simulated L1 network: `hardhatMainnet`
+- simulated OP network: `hardhatOp`
+- Sepolia HTTP network using `SEPOLIA_RPC_URL` and `SEPOLIA_PRIVATE_KEY`
 
-```shell
-npx hardhat ignition deploy ignition/modules/Counter.ts
-```
+The low optimizer run count and metadata stripping are intentional bytecode-size controls for the large protocol surface.
 
-To run the deployment to Sepolia, you need an account with funds to send the transaction. The provided Hardhat configuration includes a Configuration Variable called `SEPOLIA_PRIVATE_KEY`, which you can use to set the private key of the account you want to use.
+## Hardhat 3 Patterns To Follow
 
-You can set the `SEPOLIA_PRIVATE_KEY` variable using the `hardhat-keystore` plugin or by setting it as an environment variable.
+- Use the `hardhat` import and `network.create()` in TypeScript tests and scripts.
+- Prefer viem clients and contract helpers exposed by the viem toolbox.
+- Use Node's native test runner style for TypeScript integration tests.
+- For Solidity unit tests, keep tests under `contracts/` or `test/` with `*.t.sol`/`*.sol` as appropriate.
+- After changing contracts, compile before typechecking or running TypeScript tests so generated artifacts and types are current.
 
-To set the `SEPOLIA_PRIVATE_KEY` config variable using `hardhat-keystore`:
+## Repo-Specific Testing Priorities
 
-```shell
-npx hardhat keystore set SEPOLIA_PRIVATE_KEY
-```
+The root lifecycle test covers one happy path from LP deposit through bettor claim and LP withdrawal. Add focused tests for:
 
-After setting the variable, you can run the deployment with the Sepolia network:
-
-```shell
-npx hardhat ignition deploy --network sepolia ignition/modules/Counter.ts
-```
+- constructor defaults and admin/operator permissions
+- epoch initialization edge cases, NAV, and withdrawal failure paths
+- category voting failure paths and winner changes
+- market group and market creation invalid signatures
+- odds update signature validation, expiry, and deviation limits
+- `buyAtOdds()` fee, volume-cap, and epoch-exposure reverts
+- slip placement, same-match discounts, cross-match bonus, transfer, cancel, claim, and void refund
+- result proposal, challenge window, admin override, finalization, and permissionless voiding

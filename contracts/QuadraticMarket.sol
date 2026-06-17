@@ -61,7 +61,7 @@ contract QuadraticMarket is QuadraticSlips {
         buyFeeBps                 = 100;            // 1% direct purchase fee
         nextMarketId              = 1;
         nextGroupId               = 1;
-        nextSlipId                = 1;
+        nextSlipId                = 0;
         nextOrderId               = 1;
         currentEpoch              = 0;
         nextEpochStart            = block.timestamp + epochDurationSeconds;
