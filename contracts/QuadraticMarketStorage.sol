@@ -100,6 +100,12 @@ abstract contract QuadraticMarketStorage is ReentrancyGuard, IQuadraticMarketEve
     /// @notice Set to true the first time advanceEpoch() successfully completes.
     bool    public anyEpochSettled;
 
+    /// @notice Most recent epoch that successfully advanced and enabled withdrawals.
+    uint64  public lastSettledEpoch;
+
+    /// @notice Global anti-replay nonce consumed by createMarket oracle signatures.
+    uint256 public marketCreationNonce;
+
     // ── Operators ──────────────────────────────────────────────────────────────
 
     address[MAX_OPERATORS] internal _operators;
@@ -229,6 +235,13 @@ abstract contract QuadraticMarketStorage is ReentrancyGuard, IQuadraticMarketEve
         uint256 ep = epochs[epochId].totalLockedPayouts;
         epochs[epochId].totalLockedPayouts = ep > payout ? ep - payout : 0;
         totalLockedPayouts = totalLockedPayouts > payout ? totalLockedPayouts - payout : 0;
+    }
+
+    /// @dev Revert when LP withdrawals would race an initialized, unsettled current epoch.
+    function _requireWithdrawalsOpen() internal view {
+        if (!anyEpochSettled) revert EpochNotSettled();
+        Epoch storage ep = epochs[currentEpoch];
+        if (ep.initialized && !ep.withdrawalsEnabled) revert EpochNotSettled();
     }
 
     // ─── View helpers ─────────────────────────────────────────────────────────

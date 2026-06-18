@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { network } from "hardhat";
-import { encodePacked, getAddress, keccak256, parseUnits } from "viem";
+import { encodeAbiParameters, encodePacked, getAddress, keccak256, parseAbiParameters, parseUnits, toBytes } from "viem";
 
 const ODDS_PRECISION = 1_000_000n;
 const MAX_OUTCOMES = 8;
@@ -30,6 +30,49 @@ async function signPacked(
   values: Parameters<typeof encodePacked>[1],
 ) {
   const digest = keccak256(encodePacked(types, values));
+  return oracle.signMessage({ message: { raw: digest } });
+}
+
+async function signCreateMarket(
+  market: any,
+  oracle: Awaited<ReturnType<Awaited<ReturnType<typeof network.create>>["viem"]["getWalletClients"]>>[number],
+  publicClient: Awaited<ReturnType<Awaited<ReturnType<typeof network.create>>["viem"]["getPublicClient"]>>,
+  params: {
+    groupId: bigint;
+    title: string;
+    description: string;
+    startTime: bigint;
+    numOutcomes: number;
+    marketType: number;
+    category: number;
+    oddsAnchor: ReturnType<typeof emptyOdds>;
+    maxDeviationBps: bigint;
+    volumeCap: ReturnType<typeof emptyOdds>;
+    sigDeadline: bigint;
+  },
+) {
+  const nonce = await market.read.marketCreationNonce();
+  const digest = keccak256(encodeAbiParameters(
+    parseAbiParameters("string,uint256,address,uint64,uint256,uint64,bytes32,bytes32,uint256,uint8,uint8,uint8,uint256[8],uint256,uint256[8],uint256"),
+    [
+      "QM:createMarket:v2",
+      BigInt(await publicClient.getChainId()),
+      getAddress(market.address),
+      await market.read.currentEpoch(),
+      nonce,
+      params.groupId,
+      keccak256(toBytes(params.title)),
+      keccak256(toBytes(params.description)),
+      params.startTime,
+      params.numOutcomes,
+      params.marketType,
+      params.category,
+      params.oddsAnchor,
+      params.maxDeviationBps,
+      params.volumeCap,
+      params.sigDeadline,
+    ],
+  ));
   return oracle.signMessage({ message: { raw: digest } });
 }
 
@@ -116,43 +159,24 @@ describe("QuadraticMarket lifecycle", async function () {
     volumeCap[1] = parseUnits("500", 6);
     volumeCap[2] = parseUnits("500", 6);
 
-    const createMarketSig = await signPacked(
-      oracle,
-      [
-        "string",
-        "uint256",
-        "address",
-        "uint64",
-        "uint64",
-        "uint8",
-        "uint256[8]",
-        "uint256",
-      ],
-      [
-        "QM:createMarket",
-        await publicClient.getChainId(),
-        getAddress(market.address),
-        0n,
-        1n,
-        3,
-        oddsAnchor,
-        sigDeadline,
-      ],
-    );
+    const marketParams = {
+      groupId: 1n,
+      title: "Full-Time Result",
+      description: "Home / Draw / Away",
+      startTime: marketStart,
+      numOutcomes: 3,
+      marketType: 0,
+      category: 0,
+      oddsAnchor,
+      maxDeviationBps: 1_000n,
+      volumeCap,
+      sigDeadline,
+    };
+    const createMarketSig = await signCreateMarket(market, oracle, publicClient, marketParams);
 
     await market.write.createMarket([
       {
-        groupId: 1n,
-        title: "Full-Time Result",
-        description: "Home / Draw / Away",
-        startTime: marketStart,
-        numOutcomes: 3,
-        marketType: 0,
-        category: 0,
-        oddsAnchor,
-        maxDeviationBps: 1_000n,
-        volumeCap,
-        sigDeadline,
+        ...marketParams,
         oracleSig: createMarketSig,
       },
     ]);

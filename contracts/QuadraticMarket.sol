@@ -53,9 +53,9 @@ contract QuadraticMarket is QuadraticSlips {
         settlementDeadlineSeconds = 14_400;         // 4 hours
         withdrawalCooldownSeconds = 86_400;         // 24 hours
         epochDurationSeconds      = 86_400;         // 24 hours
-        slipHouseMarginBps        = 500;            // 5% per leg
-        maxSlipBonusMultiplierBps = 30_000;         // 3.0× max cross-match bonus
-        crossMatchBonusPerPairBps = 100;            // +1% per independent pair
+        slipHouseMarginBps        = 300;            // 3% per leg
+        maxSlipBonusMultiplierBps = 3_500;          // +35% max cross-match bonus
+        crossMatchBonusPerPairBps = 125;            // +1.25% per independent pair
         maxSingleBet              = 10_000_000_000; // 10 000 USDC (6-decimal)
         cashOutMarginBps          = 500;            // 5% early exit cut
         buyFeeBps                 = 100;            // 1% direct purchase fee
@@ -184,6 +184,7 @@ contract QuadraticMarket is QuadraticSlips {
     function advanceEpoch() external onlyAuthorized {
         Epoch storage ep = epochs[currentEpoch];
         if (!ep.initialized) revert EpochNotInitialized();
+        if (ep.numMarkets == 0 && block.timestamp < ep.endTime) revert EpochNotSettled();
         if (ep.numMarkets > 0 && ep.numSettledMarkets < ep.numMarkets) {
             revert EpochNotSettled();
         }
@@ -192,6 +193,7 @@ contract QuadraticMarket is QuadraticSlips {
         ep.withdrawalsEnabled = true;
         ep.lpSharesAtClose    = totalLpShares;
         anyEpochSettled       = true;
+        lastSettledEpoch      = currentEpoch;
 
         uint64 prev = currentEpoch;
         unchecked { ++currentEpoch; }
@@ -221,6 +223,7 @@ contract QuadraticMarket is QuadraticSlips {
         mg.title            = title;
         mg.eventStartTime   = eventStartTime;
         mg.maxGroupExposure = maxGroupExposure > 0 ? maxGroupExposure : maxMarketExposure;
+        mg.currentExposure  = 0;
         mg.numMarkets       = 0;
         mg.exists           = true;
 
@@ -239,6 +242,7 @@ contract QuadraticMarket is QuadraticSlips {
         if (p.startTime <= block.timestamp)                     revert InvalidAmount();
 
         _verifyCreateMarketSig(p);
+        unchecked { ++marketCreationNonce; }
         marketId = _nextMarketId();
 
         Market storage m = markets[marketId];
@@ -401,6 +405,11 @@ contract QuadraticMarket is QuadraticSlips {
         if (!LibOdds.withinVolumeCap(m.volumeFilled[outcomeId], m.volumeCap[outcomeId], payout)) {
             revert VolumeCapExceeded();
         }
+        if (m.hasGroup) {
+            MarketGroup storage mg = marketGroups[m.groupId];
+            if (mg.currentExposure + payout > mg.maxGroupExposure) revert VolumeCapExceeded();
+            mg.currentExposure += payout;
+        }
         _checkEpochExposure(m.epochId, payout);
 
         baseToken.safeTransferFrom(msg.sender, address(this), stake);
@@ -553,14 +562,22 @@ contract QuadraticMarket is QuadraticSlips {
     /// @dev Verify oracle ECDSA signature for createMarket's oddsAnchor.
     function _verifyCreateMarketSig(CreateMarketParams calldata p) internal view {
         if (block.timestamp > p.sigDeadline) revert ChallengeWindowExpired();
-        bytes32 msgHash = keccak256(abi.encodePacked(
-            "QM:createMarket",
+        bytes32 msgHash = keccak256(abi.encode(
+            "QM:createMarket:v2",
             block.chainid,
             address(this),
             currentEpoch,
+            marketCreationNonce,
             p.groupId,
+            keccak256(bytes(p.title)),
+            keccak256(bytes(p.description)),
+            p.startTime,
             p.numOutcomes,
+            p.marketType,
+            p.category,
             p.oddsAnchor,
+            p.maxDeviationBps,
+            p.volumeCap,
             p.sigDeadline
         ));
         address signer = ECDSA.recover(

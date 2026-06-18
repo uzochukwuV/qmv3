@@ -65,18 +65,17 @@ abstract contract QuadraticLP is QuadraticMarketStorage {
         if (lpShares[msg.sender] < shares) revert InsufficientLiquidity();
         if (withdrawalRequests[msg.sender].exists) revert WithdrawalCooldownActive();
 
-        // LP shares are fungible across epochs. Gate is anyEpochSettled, not current epoch.
-        if (!anyEpochSettled) revert EpochNotSettled();
+        _requireWithdrawalsOpen();
 
         withdrawalRequests[msg.sender] = WithdrawalRequest({
             shares:      shares,
             requestedAt: block.timestamp,
             snapshotNav: lpNav(),   // NAV floor: LP gets min(snapshotNav, currentNav) on exit
-            epochId:     currentEpoch,
+            epochId:     lastSettledEpoch,
             exists:      true
         });
 
-        emit WithdrawalRequested(msg.sender, shares, currentEpoch);
+        emit WithdrawalRequested(msg.sender, shares, lastSettledEpoch);
     }
 
     /// @notice Execute a queued withdrawal after the cooldown period.
@@ -86,6 +85,8 @@ abstract contract QuadraticLP is QuadraticMarketStorage {
     function processWithdrawal() external nonReentrant whenNotPaused {
         WithdrawalRequest storage req = withdrawalRequests[msg.sender];
         if (!req.exists) revert NoPendingWithdrawal();
+        _requireWithdrawalsOpen();
+        if (!epochs[req.epochId].withdrawalsEnabled) revert EpochNotSettled();
         if (block.timestamp < req.requestedAt + withdrawalCooldownSeconds) {
             revert WithdrawalCooldownActive();
         }
