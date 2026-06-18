@@ -80,6 +80,7 @@ struct MarketGroup {
     string   title;              // "Arsenal vs Chelsea — Jun 14 2026"
     uint256  eventStartTime;
     uint256  maxGroupExposure;   // LP-backed max payout obligation for this event
+    uint256  currentExposure;    // running payout liability linked to this event
     uint8    numMarkets;
     uint64[MAX_GROUP_MKTS] marketIds;  // IDs of all markets in this group
     bool     exists;
@@ -100,6 +101,7 @@ struct Market {
     uint256 maxDeviationBps;              // on-chain guarantee: currentOdds ≤ anchor ± this
     uint256[MAX_OUTCOMES] volumeCap;      // per-outcome max payout liability (LP-backed)
     uint256[MAX_OUTCOMES] volumeFilled;   // per-outcome running payout liability
+    uint256[MAX_OUTCOMES] slipVolumeFilled; // per-outcome liability from active multi-leg slips
     uint256 oddsLastUpdated;              // block.timestamp of last updateOdds call
 
     // ── Settlement ─────────────────────────────────────────────────────────────
@@ -302,6 +304,7 @@ interface IQuadraticMarketEvents {
     event SlipClaimed(uint64 indexed slipId, address indexed owner, uint256 payout);
     event SlipCancelled(uint64 indexed slipId, address indexed owner);
     event SlipVoidRefund(uint64 indexed slipId, address indexed owner, uint256 refund);
+    event SlipLostSettled(uint64 indexed slipId, address indexed owner);
     // Slip token events (ERC721-like transfer primitives for P2P marketplace)
     event SlipTransferred(uint64 indexed slipId, address indexed from, address indexed to);
     event SlipApproved(uint64 indexed slipId, address indexed owner, address indexed approved);

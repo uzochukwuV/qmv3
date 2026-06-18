@@ -147,6 +147,16 @@ abstract contract QuadraticSlips is QuadraticLP {
         uint256 potentialPayout = (p.totalStake * finalOdds) / ODDS_PRECISION;
         _checkEpochExposure(epochId, potentialPayout);
 
+        for (uint8 i = 0; i < p.numLegs; ) {
+            PlaceSlipLeg calldata leg = p.legs[i];
+            Market storage m = markets[leg.marketId];
+            uint256 filled = m.volumeFilled[leg.outcomeId] + m.slipVolumeFilled[leg.outcomeId];
+            if (!LibOdds.withinVolumeCap(filled, m.volumeCap[leg.outcomeId], potentialPayout)) {
+                revert VolumeCapExceeded();
+            }
+            unchecked { ++i; }
+        }
+
         // ── Step 4: execute — transfer, mint token, lock payout ───────────────
         baseToken.safeTransferFrom(msg.sender, address(this), p.totalStake);
 
@@ -168,6 +178,7 @@ abstract contract QuadraticSlips is QuadraticLP {
         slipOwner[slipId]    = msg.sender;
         slipApproved[slipId] = address(0);
 
+        _reserveSlipExposure(slipId, potentialPayout);
         _lockPayout(epochId, potentialPayout);
 
         emit SlipPlaced(slipId, msg.sender, p.numLegs, p.totalStake, potentialPayout);
@@ -224,6 +235,7 @@ abstract contract QuadraticSlips is QuadraticLP {
         slipOwner[slipId]    = address(0);
         slipApproved[slipId] = address(0);
 
+        _releaseSlipExposure(slipId, payout);
         _unlockPayout(slip.epochId, payout);
 
         baseToken.safeTransfer(owner, payout);
@@ -252,6 +264,7 @@ abstract contract QuadraticSlips is QuadraticLP {
         slipOwner[slipId]    = address(0);
         slipApproved[slipId] = address(0);
 
+        _releaseSlipExposure(slipId, slip.potentialPayout);
         _unlockPayout(slip.epochId, slip.potentialPayout);
 
         baseToken.safeTransfer(owner, stake);
@@ -283,24 +296,91 @@ abstract contract QuadraticSlips is QuadraticLP {
         slipOwner[slipId]    = address(0);
         slipApproved[slipId] = address(0);
 
+        _releaseSlipExposure(slipId, slip.potentialPayout);
         _unlockPayout(slip.epochId, slip.potentialPayout);
 
         baseToken.safeTransfer(owner, stake);
         emit SlipCancelled(slipId, owner);
     }
 
-    // ─── Slip Config Admin ────────────────────────────────────────────────────
+    /// @notice Finalize a losing slip and release its reserved LP payout capacity.
+    ///         Callable by anyone once at least one leg has settled against the slip.
+    function settleLostSlip(uint64 slipId) external nonReentrant whenNotPaused {
+        BetSlip storage slip = betSlips[slipId];
+        if (slip.status != SlipStatus.Active) revert InvalidMarketStatus();
 
-    /// @notice Admin: update multi-leg slip odds parameters.
-    ///         Pass type(uint256).max to leave a field unchanged.
-    function updateSlipConfig(
-        uint256 newSlipMarginBps,
-        uint256 newCrossBonusPerPairBps,
-        uint256 newMaxCrossBonusBps
-    ) external onlyAdmin {
-        uint256 MAX = type(uint256).max;
-        if (newSlipMarginBps        != MAX) slipHouseMarginBps        = newSlipMarginBps;
-        if (newCrossBonusPerPairBps != MAX) crossMatchBonusPerPairBps = newCrossBonusPerPairBps;
-        if (newMaxCrossBonusBps     != MAX) maxSlipBonusMultiplierBps = newMaxCrossBonusBps;
+        (, , , bool hasLost) = slipResult(slipId);
+        if (!hasLost) revert InvalidMarketStatus();
+
+        uint256 payout = slip.potentialPayout;
+        slip.status = SlipStatus.Cancelled;
+
+        address owner = slipOwner[slipId];
+        slipOwner[slipId]    = address(0);
+        slipApproved[slipId] = address(0);
+
+        _releaseSlipExposure(slipId, payout);
+        _unlockPayout(slip.epochId, payout);
+        emit SlipLostSettled(slipId, owner);
     }
+
+    function _reserveSlipExposure(uint64 slipId, uint256 payout) internal {
+        BetSlip storage slip = betSlips[slipId];
+        uint8 numLegs = slip.numLegs;
+        uint64[MAX_SLIP_LEGS] memory seenGroups;
+        uint8 seen;
+
+        for (uint8 i = 0; i < numLegs; ) {
+            SlipLeg storage leg = slip.legs[i];
+            Market storage m = markets[leg.marketId];
+            m.slipVolumeFilled[leg.outcomeId] += payout;
+
+            if (m.hasGroup && !_seenGroup(seenGroups, seen, m.groupId)) {
+                MarketGroup storage mg = marketGroups[m.groupId];
+                if (mg.currentExposure + payout > mg.maxGroupExposure) revert VolumeCapExceeded();
+                mg.currentExposure += payout;
+                seenGroups[seen] = m.groupId;
+                unchecked { ++seen; }
+            }
+
+            unchecked { ++i; }
+        }
+    }
+
+    function _releaseSlipExposure(uint64 slipId, uint256 payout) internal {
+        BetSlip storage slip = betSlips[slipId];
+        uint8 numLegs = slip.numLegs;
+        uint64[MAX_SLIP_LEGS] memory seenGroups;
+        uint8 seen;
+
+        for (uint8 i = 0; i < numLegs; ) {
+            SlipLeg storage leg = slip.legs[i];
+            Market storage m = markets[leg.marketId];
+
+            uint256 filled = m.slipVolumeFilled[leg.outcomeId];
+            m.slipVolumeFilled[leg.outcomeId] = filled > payout ? filled - payout : 0;
+
+            if (m.hasGroup && !_seenGroup(seenGroups, seen, m.groupId)) {
+                MarketGroup storage mg = marketGroups[m.groupId];
+                mg.currentExposure = mg.currentExposure > payout ? mg.currentExposure - payout : 0;
+                seenGroups[seen] = m.groupId;
+                unchecked { ++seen; }
+            }
+
+            unchecked { ++i; }
+        }
+    }
+
+    function _seenGroup(
+        uint64[MAX_SLIP_LEGS] memory seenGroups,
+        uint8 seen,
+        uint64 groupId
+    ) internal pure returns (bool) {
+        for (uint8 i = 0; i < seen; ) {
+            if (seenGroups[i] == groupId) return true;
+            unchecked { ++i; }
+        }
+        return false;
+    }
+
 }
