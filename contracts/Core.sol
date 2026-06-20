@@ -558,6 +558,13 @@ contract Core is QuadraticCoreStorage {
         m.volumeFilled[outcomeId] += payout;
         m.lockedPayout            += payout;
         m.backing                 += stake;
+
+        // Track collected fees for analytics
+        if (buyFeeBps > 0) {
+            uint256 fee = stake - effectiveStake;
+            totalFeesCollected += fee;
+        }
+
         _lockPayout(m.epochId, payout);
 
         emit BetPlaced(marketId, msg.sender, outcomeId, stake, odds, payout);
@@ -788,6 +795,12 @@ contract Core is QuadraticCoreStorage {
         );
         if (signer != oracle) revert InvalidOracleSignature();
     }
+
+    /// @dev Note on nonce handling: marketCreationNonce is incremented AFTER signature
+    /// verification. If createMarket reverts after increment (e.g., insufficient gas),
+    /// the oracle's off-chain signer may have already incremented its tracking nonce,
+    /// causing a desync. Operationally, the oracle should detect this and retry with
+    /// the same nonce once the on-chain nonce catches up.
 
     /// @dev Compute auto volume cap = epochMaxExposure / numOutcomes.
     function _autoVolumeCap(Epoch storage ep, uint8 numOutcomes) internal view returns (uint256) {

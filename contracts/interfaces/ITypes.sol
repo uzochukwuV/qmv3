@@ -70,6 +70,7 @@ uint256 constant MAX_GROUP_MKTS       = 8;
 uint256 constant MAX_OPERATORS        = 8;
 uint256 constant ODDS_PRECISION       = 1_000_000;   // 2.80 stored as 2_800_000
 uint256 constant BPS                  = 10_000;       // basis points denominator
+uint256 constant SETTLE_REWARD_BPS   = 10;           // caller reward for settleLostSlip (0.1%)
 uint8   constant NUM_SPORT_CATEGORIES = 6;            // length of the SportCategory enum
 
 /// @notice A single real-world match/event that groups multiple betting markets.

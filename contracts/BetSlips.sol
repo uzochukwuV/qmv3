@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import "./SlipStorage.sol";
 import "./interfaces/IInterContract.sol";
+import "./interfaces/ITypes.sol";
 import "./libraries/LibGroupDiscount.sol";
 import "./libraries/LibOdds.sol";
 
@@ -397,6 +398,7 @@ contract BetSlips is SlipStorage {
 
     /// @notice Finalize a losing slip and release its reserved LP payout capacity.
     ///         Callable by anyone once at least one leg has settled against the slip.
+    ///         Caller receives a small reward (SETTLE_REWARD_BPS) of the payout.
     function settleLostSlip(uint64 slipId) external nonReentrant whenNotPaused {
         if (core == address(0)) revert Unauthorized();
 
@@ -422,6 +424,13 @@ contract BetSlips is SlipStorage {
             unchecked { ++i; }
         }
         c.unlockPayout(slip.epochId, payout);
+
+        // Caller reward: SETTLE_REWARD_BPS of payout (incentivizes keeper bots)
+        uint256 reward = (payout * SETTLE_REWARD_BPS) / BPS;
+        if (reward > 0) {
+            _baseToken().safeTransfer(msg.sender, reward);
+        }
+
         emit SlipLostSettled(slipId, owner);
     }
 
