@@ -88,6 +88,16 @@ contract Core is QuadraticCoreStorage {
         _unlockPayout(epochId, amount);
     }
 
+    /// @dev Called by BetSlips when a slip is placed. Tracks per-market/per-outcome volume for slip legs.
+    function incrementSlipVolume(uint64 marketId, uint8 outcomeId, uint256 amount) external onlyBetSlips {
+        markets[marketId].slipVolumeFilled[outcomeId] += amount;
+    }
+
+    /// @dev Called by BetSlips when a slip is settled/cancelled. Decrements slip volume tracking.
+    function decrementSlipVolume(uint64 marketId, uint8 outcomeId, uint256 amount) external onlyBetSlips {
+        markets[marketId].slipVolumeFilled[outcomeId] -= amount;
+    }
+
     function withdrawFromVault(address lp, uint256 amount) external onlyVault {
         baseToken.safeTransfer(lp, amount);
     }
