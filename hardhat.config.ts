@@ -8,16 +8,14 @@ export default defineConfig({
       default: {
         version: "0.8.28",
         settings: {
+          // viaIR: true is required for BetSlips.placeSlip (stack-too-deep in EVM bytecode),
+          // despite splitting into three contracts (each under 24,576-byte bytecode limit).
           viaIR: true,
           optimizer: {
             enabled: true,
-            // runs=1 → smallest bytecode. The contract is intentionally large
-            // (Phases 1-5); Phase 6 marketplace is a separate contract which
-            // naturally splits the surface area. For mainnet L1 use a UUPS proxy.
-            runs: 1,
+            runs: 200,
           },
           metadata: {
-            // Strip IPFS hash from deployed bytecode (saves 33 bytes — counts toward limit).
             bytecodeHash: "none",
           },
         },
@@ -25,10 +23,9 @@ export default defineConfig({
       production: {
         version: "0.8.28",
         settings: {
-          viaIR: true,
           optimizer: {
             enabled: true,
-            runs: 1,
+            runs: 200,
           },
           metadata: {
             bytecodeHash: "none",
