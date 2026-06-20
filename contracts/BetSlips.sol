@@ -8,6 +8,15 @@ import "./interfaces/IInterContract.sol";
 import "./libraries/LibGroupDiscount.sol";
 import "./libraries/LibOdds.sol";
 
+/// @dev Holds odds computation results to reduce stack pressure.
+struct OddsResult {
+    uint256 finalOdds;
+    uint256 marginBps;
+    uint256 discountBps;
+    uint256 crossBonus;
+    uint64  epochId;
+}
+
 /// @title BetSlips
 /// @notice Multi-leg accumulator bet slip logic — standalone contract.
 ///
@@ -130,18 +139,60 @@ contract BetSlips is SlipStorage {
         uint256 totalStake = p.totalStake;
         if (totalStake == 0 || totalStake > c.maxSingleBet()) revert InvalidAmount();
 
-        // Copy legs from calldata to memory arrays to avoid EVM stack blowup.
+        // Allocate memory arrays
         uint64[]   memory mIds = new uint64[](numLegs);
         uint8[]    memory oIds = new uint8[](numLegs);
-        uint256[]   memory oVals = new uint256[](numLegs);
-        uint64[]    memory gIds = new uint64[](numLegs);
+        uint256[]  memory oVals = new uint256[](numLegs);
+        uint64[]   memory gIds = new uint64[](numLegs);
         GroupType[] memory gTypes = new GroupType[](numLegs);
         bool[]     memory hasGrp = new bool[](numLegs);
-        uint256[]   memory minOddsVals = new uint256[](numLegs);
 
-        uint64 epochId;
+        // Collect legs and compute odds
+        OddsResult memory result = _collectAndPrice(c, p, numLegs, mIds, oIds, oVals, gIds, gTypes, hasGrp);
+
+        // Check payout and volume caps
+        uint256 payout = (totalStake * result.finalOdds) / ODDS_PRECISION;
+        _checkPayoutAndCaps(c, result.epochId, payout, numLegs, mIds, oIds);
+
+        // Mint slip
+        unchecked { slipId = ++nextSlipId; }
+        _mintSlip(slipId, msg.sender, result.epochId, numLegs, totalStake, result, mIds, oIds, oVals, payout);
+
+        slipOwner[slipId] = msg.sender;
+        slipApproved[slipId] = address(0);
+        slipEpochLockedPayouts[slipId] = payout;
+
+        c.lockPayout(result.epochId, payout);
+        _baseToken().safeTransferFrom(msg.sender, core, totalStake);
+
+        emit SlipPlaced(slipId, msg.sender, numLegs, totalStake, payout);
+    }
+
+    /// @dev Checks payout capacity and volume caps per outcome.
+    function _checkPayoutAndCaps(
+        ICore c, uint64 epochId, uint256 payout, uint8 numLegs,
+        uint64[] memory mIds, uint8[] memory oIds
+    ) internal {
+        uint256 maxExp = c.maxEpochExposure(epochId);
+        uint256 locked = c.getEpochTotalLockedPayouts(epochId);
+        if (maxExp == 0) revert InsufficientLiquidity();
+        if (locked + payout > maxExp) revert VolumeCapExceeded();
+        for (uint8 i = 0; i < numLegs; ) {
+            uint256 filled = c.getMarketVolumeFilled(mIds[i], oIds[i])
+                           + c.getMarketSlipVolumeFilled(mIds[i], oIds[i]);
+            uint256 cap = c.getMarketVolumeCap(mIds[i], oIds[i]);
+            if (!LibOdds.withinVolumeCap(filled, cap, payout)) revert VolumeCapExceeded();
+            unchecked { ++i; }
+        }
+    }
+
+    /// @dev Collects leg data, validates markets, and computes final odds.
+    function _collectAndPrice(
+        ICore c, PlaceSlipParams calldata p, uint8 numLegs,
+        uint64[] memory mIds, uint8[] memory oIds, uint256[] memory oVals,
+        uint64[] memory gIds, GroupType[] memory gTypes, bool[] memory hasGrp
+    ) internal returns (OddsResult memory result) {
         uint256 combinedOdds = ODDS_PRECISION;
-
         for (uint8 i = 0; i < numLegs; ) {
             uint64 mid = p.legs[i].marketId;
             uint8 oid = p.legs[i].outcomeId;
@@ -150,8 +201,8 @@ contract BetSlips is SlipStorage {
             if (m.status != MarketStatus.Open) revert MarketNotOpen();
             if (block.timestamp >= m.startTime) revert MarketAlreadyStarted();
             if (oid >= m.numOutcomes) revert InvalidOutcomeId();
-            if (i == 0) epochId = m.epochId;
-            else if (m.epochId != epochId) revert EpochNotInitialized();
+            if (i == 0) result.epochId = m.epochId;
+            else if (m.epochId != result.epochId) revert EpochNotInitialized();
             uint256 odds = m.currentOdds[oid];
             if (odds < minOd) revert OddsSlippageExceeded();
             combinedOdds = (combinedOdds * odds) / ODDS_PRECISION;
@@ -162,73 +213,40 @@ contract BetSlips is SlipStorage {
             hasGrp[i] = (m.groupId != 0);
             gIds[i] = m.groupId;
             gTypes[i] = m.marketType;
-            minOddsVals[i] = minOd;
 
             unchecked { ++i; }
         }
 
-        // Compute final odds
-        uint256 marginBps = c.slipHouseMarginBps();
-        uint256 discountBps = LibGroupDiscount.computeSlipDiscountBps(gIds, gTypes, hasGrp, numLegs);
-        uint256 crossBonus = LibGroupDiscount.crossMatchBonusBps(gIds, hasGrp, numLegs,
+        // Compute final odds with discounts
+        result.marginBps = c.slipHouseMarginBps();
+        result.discountBps = LibGroupDiscount.computeSlipDiscountBps(gIds, gTypes, hasGrp, numLegs);
+        result.crossBonus = LibGroupDiscount.crossMatchBonusBps(gIds, hasGrp, numLegs,
             c.crossMatchBonusPerPairBps(), c.maxSlipBonusMultiplierBps());
-        uint256 margined = marginBps > 0
-            ? (combinedOdds * (BPS - marginBps)) / BPS : combinedOdds;
-        uint256 discounted = (margined * discountBps) / BPS;
-        uint256 finalOdds = crossBonus > 0
-            ? (discounted * (BPS + crossBonus)) / BPS : discounted;
-        if (finalOdds < p.minCombinedOdds) revert OddsSlippageExceeded();
-        if (finalOdds < LibOdds.MIN_ODDS) revert OddsBelowMinimum();
-
-        // Payout and cap checks
-        uint256 payout = (totalStake * finalOdds) / ODDS_PRECISION;
-        uint256 maxExp = c.maxEpochExposure(epochId);
-        uint256 locked = c.getEpochTotalLockedPayouts(epochId);
-        if (maxExp == 0) revert InsufficientLiquidity();
-        if (locked + payout > maxExp) revert VolumeCapExceeded();
-
-        for (uint8 i = 0; i < numLegs; ) {
-            uint256 filled = c.getMarketVolumeFilled(mIds[i], oIds[i])
-                           + c.getMarketSlipVolumeFilled(mIds[i], oIds[i]);
-            uint256 cap = c.getMarketVolumeCap(mIds[i], oIds[i]);
-            if (!LibOdds.withinVolumeCap(filled, cap, payout)) revert VolumeCapExceeded();
-            unchecked { ++i; }
-        }
-
-        // Mint slip
-        unchecked { slipId = ++nextSlipId; }
-        _mintSlip(slipId, msg.sender, epochId, numLegs, totalStake, finalOdds,
-            payout, marginBps, discountBps, crossBonus, mIds, oIds, oVals);
-
-        slipOwner[slipId] = msg.sender;
-        slipApproved[slipId] = address(0);
-        slipEpochLockedPayouts[slipId] = payout;
-
-        c.lockPayout(epochId, payout);
-        _baseToken().safeTransferFrom(msg.sender, core, totalStake);
-
-        emit SlipPlaced(slipId, msg.sender, numLegs, totalStake, payout);
+        uint256 margined = result.marginBps > 0
+            ? (combinedOdds * (BPS - result.marginBps)) / BPS : combinedOdds;
+        uint256 discounted = (margined * result.discountBps) / BPS;
+        result.finalOdds = result.crossBonus > 0
+            ? (discounted * (BPS + result.crossBonus)) / BPS : discounted;
+        if (result.finalOdds < p.minCombinedOdds) revert OddsSlippageExceeded();
+        if (result.finalOdds < LibOdds.MIN_ODDS) revert OddsBelowMinimum();
     }
 
-    /// @dev Writes slip data to storage using memory arrays.
+    /// @dev Writes slip data to storage.
     function _mintSlip(
         uint64 slipId, address creator, uint64 epochId, uint8 numLegs,
-        uint256 totalStake, uint256 finalOdds, uint256 payout,
-        uint256 marginBps, uint256 discountBps, uint256 crossBonus,
-        uint64[] memory mIds, uint8[] memory oIds, uint256[] memory oVals
+        uint256 totalStake, OddsResult memory result,
+        uint64[] memory mIds, uint8[] memory oIds, uint256[] memory oVals, uint256 payout
     ) internal {
-        // NOTE: discountBps and crossBonus passed in from placeSlip already computed.
-        // We do NOT re-compute them here (would need market data which we don't have).
         BetSlip storage slip = betSlips[slipId];
         slip.slipId = slipId;
         slip.creator = creator;
         slip.epochId = epochId;
         slip.numLegs = numLegs;
         slip.totalStake = totalStake;
-        slip.combinedOdds = finalOdds;
-        slip.houseMarginBps = marginBps;
-        slip.discountBps = discountBps;
-        slip.crossBonusBps = crossBonus;
+        slip.combinedOdds = result.finalOdds;
+        slip.houseMarginBps = result.marginBps;
+        slip.discountBps = result.discountBps;
+        slip.crossBonusBps = result.crossBonus;
         slip.potentialPayout = payout;
         slip.status = SlipStatus.Active;
         slip.createdAt = block.timestamp;
