@@ -5,16 +5,19 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 
-import "./QuadraticSlips.sol";
+import "./QuadraticCoreStorage.sol";
+import "./interfaces/IInterContract.sol";
 import "./libraries/LibOdds.sol";
 
-/// @title QuadraticMarket
+/// @title Core
 /// @notice Decentralized fixed-odds sports betting protocol — deployed contract.
 ///
-/// This is the thin concrete leaf of the inheritance chain:
-///   QuadraticMarketStorage → QuadraticLP → QuadraticSlips → QuadraticMarket
+/// Architecture:
+///   Core (this):    USDC treasury, markets, epochs, settlement, single-outcome bets
+///   LiquidityVault: LP deposits, withdrawals, NAV, category voting
+///   BetSlips:       Multi-leg accumulator slips
 ///
-/// Responsibilities:
+/// Core responsibilities:
 ///   • Constructor + protocol initialisation
 ///   • Admin & operator management
 ///   • Epoch lifecycle (initEpoch / advanceEpoch)
@@ -23,17 +26,12 @@ import "./libraries/LibOdds.sol";
 ///   • Single-outcome bet placement (buyAtOdds)
 ///   • Settlement pipeline: proposeResult → adminOverride / finalizeResult → claimPayout
 ///   • Permissionless void safety net (voidIfExpired)
-///
-/// LP vault logic lives in QuadraticLP.sol.
-/// Multi-leg slip logic lives in QuadraticSlips.sol.
-contract QuadraticMarket is QuadraticSlips {
+///   • Cross-contract calls to Vault and BetSlips
+contract Core is QuadraticCoreStorage {
     using SafeERC20 for IERC20;
 
     // ─── Constructor ──────────────────────────────────────────────────────────
 
-    /// @param _baseToken   USDC (or any 6-decimal ERC20) used for all stakes/payouts.
-    /// @param _oracle      Address whose ECDSA signatures authorize odds updates & settlement.
-    /// @param _maxExposure Default max per-market LP exposure (in base token units).
     constructor(
         address _baseToken,
         address _oracle,
@@ -48,11 +46,10 @@ contract QuadraticMarket is QuadraticSlips {
         baseToken         = IERC20(_baseToken);
         maxMarketExposure = _maxExposure;
 
-        // Default protocol parameters
         challengeWindowSeconds    = 300;            // 5 minutes
         settlementDeadlineSeconds = 14_400;         // 4 hours
         withdrawalCooldownSeconds = 86_400;         // 24 hours
-        epochDurationSeconds      = 86_400;         // 24 hours
+        epochDurationSeconds     = 86_400;         // 24 hours
         slipHouseMarginBps        = 300;            // 3% per leg
         maxSlipBonusMultiplierBps = 3_500;          // +35% max cross-match bonus
         crossMatchBonusPerPairBps = 125;            // +1.25% per independent pair
@@ -69,6 +66,144 @@ contract QuadraticMarket is QuadraticSlips {
         emit AdminTransferred(address(0), msg.sender);
     }
 
+    // ─── Cross-contract setters ─────────────────────────────────────────────
+
+    function setLiquidityVault(address vault) external onlyAdmin {
+        require(vault != address(0), "ZeroAddress");
+        liquidityVault = vault;
+    }
+
+    function setBetSlips(address slips) external onlyAdmin {
+        require(slips != address(0), "ZeroAddress");
+        betSlips = slips;
+    }
+
+    // ─── ICore: Payout locking ──────────────────────────────────────────────
+
+    function lockPayout(uint64 epochId, uint256 amount) external onlyBetSlips {
+        _lockPayout(epochId, amount);
+    }
+
+    function unlockPayout(uint64 epochId, uint256 amount) external onlyBetSlips {
+        _unlockPayout(epochId, amount);
+    }
+
+    function withdrawFromVault(address lp, uint256 amount) external onlyVault {
+        baseToken.safeTransfer(lp, amount);
+    }
+
+    // ─── ICore: Market reads ────────────────────────────────────────────────
+
+    function getMarket(uint64 marketId) external view returns (Market memory m) {
+        return markets[marketId];
+    }
+
+    function getMarketStatus(uint64 marketId) external view returns (MarketStatus) {
+        return markets[marketId].status;
+    }
+
+    function getMarketCurrentOdds(uint64 marketId, uint8 outcomeId) external view returns (uint256) {
+        return markets[marketId].currentOdds[outcomeId];
+    }
+
+    function getMarketEpochId(uint64 marketId) external view returns (uint64) {
+        return markets[marketId].epochId;
+    }
+
+    function getMarketStartTime(uint64 marketId) external view returns (uint256) {
+        return markets[marketId].startTime;
+    }
+
+    function getMarketGroupId(uint64 marketId) external view returns (uint64) {
+        return markets[marketId].groupId;
+    }
+
+    function getMarketType(uint64 marketId) external view returns (GroupType) {
+        return markets[marketId].marketType;
+    }
+
+    function getMarketVolumeCap(uint64 marketId, uint8 outcomeId) external view returns (uint256) {
+        return markets[marketId].volumeCap[outcomeId];
+    }
+
+    function getMarketVolumeFilled(uint64 marketId, uint8 outcomeId) external view returns (uint256) {
+        return markets[marketId].volumeFilled[outcomeId];
+    }
+
+    function getMarketSlipVolumeFilled(uint64 marketId, uint8 outcomeId) external view returns (uint256) {
+        return markets[marketId].slipVolumeFilled[outcomeId];
+    }
+
+    function getMarketWinningOutcome(uint64 marketId) external view returns (uint8) {
+        return markets[marketId].winningOutcome;
+    }
+
+    function getMarketGroupExposure(uint64 groupId) external view returns (uint256) {
+        return marketGroups[groupId].currentExposure;
+    }
+
+    function getMarketMaxGroupExposure(uint64 groupId) external view returns (uint256) {
+        return marketGroups[groupId].maxGroupExposure;
+    }
+
+    function getGroupNumMarkets(uint64 groupId) external view returns (uint16) {
+        return marketGroups[groupId].numMarkets;
+    }
+
+    function getGroupMarketId(uint64 groupId, uint8 index) external view returns (uint64) {
+        return marketGroups[groupId].marketIds[index];
+    }
+
+    // ─── ICore: Epoch reads ─────────────────────────────────────────────────
+
+    function getEpochInitialized(uint64 epochId) external view returns (bool) {
+        return epochs[epochId].initialized;
+    }
+
+    function getEpochStartTime(uint64 epochId) external view returns (uint256) {
+        return epochs[epochId].startTime;
+    }
+
+    function getEpochEndTime(uint64 epochId) external view returns (uint256) {
+        return epochs[epochId].endTime;
+    }
+
+    function getEpochTotalLiquidityAdded(uint64 epochId) external view returns (uint256) {
+        return epochs[epochId].totalLiquidityAdded;
+    }
+
+    function getEpochMaxExposureMultiplierBps(uint64 epochId) external view returns (uint256) {
+        return epochs[epochId].maxExposureMultiplierBps;
+    }
+
+    function getEpochTotalLockedPayouts(uint64 epochId) external view returns (uint256) {
+        return epochs[epochId].totalLockedPayouts;
+    }
+
+    function getEpochWithdrawalsEnabled(uint64 epochId) external view returns (bool) {
+        return epochs[epochId].withdrawalsEnabled;
+    }
+
+    function getEpochAllMarketsSettled(uint64 epochId) external view returns (bool) {
+        return epochs[epochId].allMarketsSettled;
+    }
+
+    function getEpochNumMarkets(uint64 epochId) external view returns (uint16) {
+        return epochs[epochId].numMarkets;
+    }
+
+    function getEpochNumSettledMarkets(uint64 epochId) external view returns (uint16) {
+        return epochs[epochId].numSettledMarkets;
+    }
+
+    function hasAnyEpochSettled() external view returns (bool) {
+        return anyEpochSettled;
+    }
+
+    function getWithdrawalCooldownSeconds() external view returns (uint256) {
+        return withdrawalCooldownSeconds;
+    }
+
     // ─── Admin & Operator Management ─────────────────────────────────────────
 
     /// @notice Transfer protocol admin to a new address.
@@ -79,7 +214,7 @@ contract QuadraticMarket is QuadraticSlips {
     }
 
     /// @notice Halt all bet placement, liquidity changes, and oracle updates.
-    function pause() external onlyAuthorized {
+    function pause() external onlyAdmin {
         paused = true;
         emit ProtocolPaused(msg.sender);
     }
@@ -117,13 +252,11 @@ contract QuadraticMarket is QuadraticSlips {
 
     /// @notice Return the operator address at index i (for enumeration).
     function getOperator(uint8 i) external view returns (address) {
-        require(i < numOperators, "QuadraticMarket: index out of range");
+        require(i < numOperators, "Core: index out of range");
         return _operators[i];
     }
 
     /// @notice Bulk update protocol risk & timing parameters.
-    ///         Pass type(uint256).max to leave a uint256 field unchanged.
-    ///         Pass address(type(uint160).max) to leave the oracle address unchanged.
     function updateConfig(ConfigUpdate calldata u) external onlyAdmin {
         uint256 MAX = type(uint256).max;
         if (u.maxMarketExposure         != MAX) maxMarketExposure         = u.maxMarketExposure;
@@ -145,9 +278,7 @@ contract QuadraticMarket is QuadraticSlips {
 
     /// @notice Initialize the on-chain Epoch record for currentEpoch.
     ///         Opens the LP deposit window immediately. Deposits close at epochStartTime.
-    ///
-    /// @param epochStartTime          Unix timestamp when trading opens and deposits close.
-    /// @param maxExposureMultiplierBps  e.g. 15 000 = 1.5× — LP can lose at most 50% of deposit.
+    ///         Notifies LiquidityVault so it can open its deposit window.
     function initEpoch(
         uint256 epochStartTime,
         uint256 maxExposureMultiplierBps
@@ -177,10 +308,16 @@ contract QuadraticMarket is QuadraticSlips {
 
         emit EpochInitialized(eid, epochStartTime, endTime);
         emit EpochDepositsGated(eid, epochStartTime);
+
+        // Notify Vault to open its deposit window for this epoch
+        if (liquidityVault != address(0)) {
+            ILiquidityVault(liquidityVault).onEpochInit(eid, epochStartTime, endTime, maxExposureMultiplierBps);
+        }
     }
 
     /// @notice Advance to the next epoch once all current-epoch markets are settled.
     ///         Flips withdrawalsEnabled on the completed epoch. Call initEpoch() next.
+    ///         Notifies LiquidityVault to enable LP withdrawals.
     function advanceEpoch() external onlyAuthorized {
         Epoch storage ep = epochs[currentEpoch];
         if (!ep.initialized) revert EpochNotInitialized();
@@ -191,7 +328,7 @@ contract QuadraticMarket is QuadraticSlips {
 
         ep.allMarketsSettled  = true;
         ep.withdrawalsEnabled = true;
-        ep.lpSharesAtClose    = totalLpShares;
+        ep.lpSharesAtClose    = ILiquidityVault(liquidityVault).totalLpShares();
         anyEpochSettled       = true;
         lastSettledEpoch      = currentEpoch;
 
@@ -200,15 +337,16 @@ contract QuadraticMarket is QuadraticSlips {
         epochPaused = false;
 
         emit EpochAdvanced(prev, currentEpoch);
+
+        // Notify Vault to enable withdrawals for the completed epoch
+        if (liquidityVault != address(0)) {
+            ILiquidityVault(liquidityVault).onAdvanceEpoch(prev);
+        }
     }
 
     // ─── Market Groups ────────────────────────────────────────────────────────
 
     /// @notice Create a new MarketGroup (the real-world event / match).
-    ///
-    /// @param title            e.g. "Arsenal vs Chelsea — Jun 14 2026"
-    /// @param eventStartTime   Informational — when the event kicks off
-    /// @param maxGroupExposure LP-backed payout cap for this event (0 = maxMarketExposure)
     function createMarketGroup(
         string   calldata title,
         uint256  eventStartTime,
@@ -233,8 +371,6 @@ contract QuadraticMarket is QuadraticSlips {
     // ─── Market Lifecycle ─────────────────────────────────────────────────────
 
     /// @notice Create an individual betting market (PreOpen) inside a MarketGroup.
-    ///         Status is PreOpen until openMarket() is called once the epoch starts.
-    ///         The oddsAnchor array must carry a valid oracle ECDSA signature.
     function createMarket(CreateMarketParams calldata p) external onlyAuthorized returns (uint64 marketId) {
         Epoch storage ep = epochs[currentEpoch];
         if (!ep.initialized)                                    revert EpochNotInitialized();
@@ -335,8 +471,6 @@ contract QuadraticMarket is QuadraticSlips {
     // ─── Oracle Odds Updates ──────────────────────────────────────────────────
 
     /// @notice Update market odds via oracle-signed payload.
-    ///         Only callable before market.startTime. Each new value is validated
-    ///         against the creation-time anchor via LibOdds.withinDeviation.
     function updateOdds(
         uint64                        marketId,
         uint256[MAX_OUTCOMES] calldata newOdds,
@@ -373,12 +507,6 @@ contract QuadraticMarket is QuadraticSlips {
     // ─── Single-Outcome Bet ───────────────────────────────────────────────────
 
     /// @notice Place a single-outcome bet at current oracle odds.
-    ///         `minOdds` is mandatory — it protects the bettor from front-running.
-    ///
-    /// @param marketId   Target market
-    /// @param outcomeId  Outcome index to back (0-indexed)
-    /// @param stake      USDC to stake (6-decimal units)
-    /// @param minOdds    Minimum acceptable odds (× ODDS_PRECISION)
     function buyAtOdds(
         uint64  marketId,
         uint8   outcomeId,
@@ -427,8 +555,7 @@ contract QuadraticMarket is QuadraticSlips {
 
     // ─── Permissionless Void Safety Net ──────────────────────────────────────
 
-    /// @notice Void a market if the oracle has not settled it within
-    ///         settlementDeadlineSeconds after market.startTime. Permissionless.
+    /// @notice Void a market if the oracle has not settled it within the deadline.
     function voidIfExpired(uint64 marketId) external {
         Market storage m = markets[marketId];
         if (m.marketId == 0)                      revert InvalidMarketStatus();
@@ -446,13 +573,17 @@ contract QuadraticMarket is QuadraticSlips {
         unchecked { ++ep.numSettledMarkets; }
         if (ep.numSettledMarkets >= ep.numMarkets) ep.allMarketsSettled = true;
 
+        // Notify BetSlips so slipResult() reflects the voided status
+        if (betSlips != address(0)) {
+            IBetSlips(betSlips).onMarketVoided(marketId);
+        }
+
         emit MarketStatusChanged(marketId, MarketStatus.Voided);
     }
 
     // ─── Settlement Pipeline ──────────────────────────────────────────────────
 
     /// @notice Oracle proposes the winning outcome. Opens a challenge window.
-    ///         Accepts Open, Suspended, or AwaitingResult markets past startTime.
     function proposeResult(
         uint64  marketId,
         uint8   winningOutcome,
@@ -494,7 +625,6 @@ contract QuadraticMarket is QuadraticSlips {
     }
 
     /// @notice Admin corrects an oracle result within the challenge window.
-    ///         Immediately finalizes with the corrected outcome.
     function adminOverride(uint64 marketId, uint8 correctedOutcome) external onlyAdmin {
         Market storage m = markets[marketId];
         if (m.status != MarketStatus.Proposed) revert InvalidMarketStatus();
@@ -557,7 +687,69 @@ contract QuadraticMarket is QuadraticSlips {
         emit PayoutClaimed(marketId, msg.sender, stake);
     }
 
-    // ─── Internal helpers (Phase 3 + 4) ──────────────────────────────────────
+    // ─── Slip forwarding ────────────────────────────────────────────────────────
+
+    /// @notice Forward a slip placement through Core (optional UX path).
+    ///         Users can also call BetSlips.placeSlip() directly.
+    function placeSlip(PlaceSlipParams calldata p) external nonReentrant whenNotPaused returns (uint64) {
+        if (betSlips == address(0)) revert Unauthorized();
+        return IBetSlips(betSlips).placeSlip(p);
+    }
+
+    /// @notice Forward slip payout claim through Core (optional UX path).
+    function claimSlipPayout(uint64 slipId) external nonReentrant whenNotPaused {
+        if (betSlips == address(0)) revert Unauthorized();
+        IBetSlips(betSlips).claimSlipPayout(slipId);
+    }
+
+    /// @notice Forward slip void refund through Core (optional UX path).
+    function claimSlipVoidRefund(uint64 slipId) external nonReentrant whenNotPaused {
+        if (betSlips == address(0)) revert Unauthorized();
+        IBetSlips(betSlips).claimSlipVoidRefund(slipId);
+    }
+
+    /// @notice Forward slip cancellation through Core (optional UX path).
+    function cancelSlip(uint64 slipId) external nonReentrant whenNotPaused {
+        if (betSlips == address(0)) revert Unauthorized();
+        IBetSlips(betSlips).cancelSlip(slipId);
+    }
+
+    /// @notice Forward slip cancellation for losers through Core (optional UX path).
+    function settleLostSlip(uint64 slipId) external nonReentrant whenNotPaused {
+        if (betSlips == address(0)) revert Unauthorized();
+        IBetSlips(betSlips).settleLostSlip(slipId);
+    }
+
+    // ─── Slip token ownership forwarding ──────────────────────────────────────
+
+    function approveSlip(uint64 slipId, address approved) external {
+        if (betSlips == address(0)) revert Unauthorized();
+        IBetSlips(betSlips).approveSlip(slipId, approved);
+    }
+
+    function setSlipOperator(address operator, bool approved) external {
+        if (betSlips == address(0)) revert Unauthorized();
+        IBetSlips(betSlips).setSlipOperator(operator, approved);
+    }
+
+    function transferSlip(uint64 slipId, address to) external {
+        if (betSlips == address(0)) revert Unauthorized();
+        IBetSlips(betSlips).transferSlip(slipId, to);
+    }
+
+    // ─── Slip state forwarding ──────────────────────────────────────────────
+
+    function slipOwner(uint64 slipId) external view returns (address) {
+        if (betSlips == address(0)) return address(0);
+        return IBetSlips(betSlips).getSlipOwner(slipId);
+    }
+
+    function slipResult(uint64 slipId) external view returns (bool pending, bool won, bool hasVoid, bool hasLost) {
+        if (betSlips == address(0)) return (false, false, false, false);
+        return IBetSlips(betSlips).slipResult(slipId);
+    }
+
+    // ─── Internal helpers ─────────────────────────────────────────────────────
 
     /// @dev Verify oracle ECDSA signature for createMarket's oddsAnchor.
     function _verifyCreateMarketSig(CreateMarketParams calldata p) internal view {
@@ -595,9 +787,6 @@ contract QuadraticMarket is QuadraticSlips {
     }
 
     /// @dev Core settlement logic shared by adminOverride and finalizeResult.
-    ///
-    ///      Non-winning outcome payouts are unlocked immediately (LP liquidity freed).
-    ///      Winning payouts remain locked until each bettor calls claimPayout().
     function _finalizeMarket(uint64 marketId, uint8 winningOutcome) internal {
         Market storage m = markets[marketId];
 
@@ -616,6 +805,11 @@ contract QuadraticMarket is QuadraticSlips {
         Epoch storage ep = epochs[m.epochId];
         unchecked { ++ep.numSettledMarkets; }
         if (ep.numSettledMarkets >= ep.numMarkets) ep.allMarketsSettled = true;
+
+        // Notify BetSlips of settlement
+        if (betSlips != address(0)) {
+            IBetSlips(betSlips).onMarketSettled(marketId, winningOutcome);
+        }
 
         emit MarketFinalized(marketId, winningOutcome);
         emit MarketStatusChanged(marketId, MarketStatus.Settled);
