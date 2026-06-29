@@ -8,9 +8,9 @@ export default defineConfig({
       default: {
         version: "0.8.28",
         settings: {
+          viaIR: true,
           // viaIR: true is required for BetSlips.placeSlip (stack-too-deep in EVM bytecode),
           // despite splitting into three contracts (each under 24,576-byte bytecode limit).
-          viaIR: true,
           optimizer: {
             enabled: true,
             runs: 200,
@@ -23,6 +23,7 @@ export default defineConfig({
       production: {
         version: "0.8.28",
         settings: {
+          viaIR: true,
           optimizer: {
             enabled: true,
             runs: 200,

@@ -29,6 +29,8 @@ interface ICore {
     // ── Payout locking (called by Vault/Slips to reserve LP capacity) ───────
     function lockPayout(uint64 epochId, uint256 amount) external;
     function unlockPayout(uint64 epochId, uint256 amount) external;
+    function incrementSlipVolume(uint64 marketId, uint8 outcomeId, uint256 amount) external;
+    function decrementSlipVolume(uint64 marketId, uint8 outcomeId, uint256 amount) external;
 
     // ── Market reads (needed by BetSlips to validate legs) ─────────────────
     function getMarket(uint64 marketId) external view returns (Market memory);

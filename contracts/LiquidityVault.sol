@@ -104,9 +104,10 @@ contract LiquidityVault is VaultStorage {
         if (core == address(0)) revert Unauthorized();
 
         ICore c = ICore(core);
-        uint64 settledEpoch = c.getEpochInitialized(0) ? 0 : c.lastSettledEpoch();
         // Must have at least one settled epoch
-        if (settledEpoch == 0 && !c.hasAnyEpochSettled()) revert EpochNotSettled();
+        if (!c.hasAnyEpochSettled()) revert EpochNotSettled();
+
+        uint64 settledEpoch = c.lastSettledEpoch();
 
         withdrawalRequests[msg.sender] = WithdrawalRequest({
             shares:      shares,
@@ -188,9 +189,9 @@ contract LiquidityVault is VaultStorage {
     function lpNav() public view returns (uint256) {
         if (core == address(0)) return ODDS_PRECISION;
         if (totalLpShares == 0) return ODDS_PRECISION;
-        IERC20 tok = _baseToken();
-        uint256 bal = tok.balanceOf(core);
-        return (bal * ODDS_PRECISION) / totalLpShares;
+        // Use free liquidity (balance - locked payouts) for NAV calculation
+        uint256 freeBal = ICore(core).freeLiquidity();
+        return (freeBal * ODDS_PRECISION) / totalLpShares;
     }
 
     /// @notice USDC value of an LP's entire share balance at current NAV.

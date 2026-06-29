@@ -42,6 +42,9 @@ abstract contract QuadraticCoreStorage is ReentrancyGuard, IQuadraticMarketEvent
     /// @notice Total outstanding payout obligations across all live markets.
     uint256 public totalLockedPayouts;
 
+    /// @notice Cumulative protocol fees collected (buy fees, etc.) for analytics.
+    uint256 public totalFeesCollected;
+
     /// @notice ERC20 base token (USDC or equivalent 6-decimal stablecoin).
     IERC20  public baseToken;
 
