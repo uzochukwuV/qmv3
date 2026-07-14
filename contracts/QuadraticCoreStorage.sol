@@ -10,10 +10,10 @@ import "./interfaces/IInterContract.sol";
 import "./libraries/LibOdds.sol";
 
 /// @title QuadraticCoreStorage
-/// @notice Abstract base for QuadraticCore — owns all state Core needs.
+/// @notice Abstract base for QuadraticCore â€” owns all state Core needs.
 ///
 /// State ownership after the V3 split:
-///   Core (this):  markets, epochs, orders, disputes, outcomeBalances, betSlips,
+///   Core (this):  markets, epochs, orders, disputes, outcomeBalances,
 ///                 protocol config, token, timing, cross-contract refs
 ///   Vault:        lpShares, withdrawalRequests, lpDepositsPerEpoch, category votes
 ///   Slips:        slipOwner, slipApproved, slipOperatorApprovals (reads betSlips from Core)
@@ -22,13 +22,14 @@ import "./libraries/LibOdds.sol";
 abstract contract QuadraticCoreStorage is ReentrancyGuard, IQuadraticMarketEvents, IQuadraticMarketErrors {
     using SafeERC20 for IERC20;
 
-    // ─── Cross-contract references ─────────────────────────────────────────────
+    // â”€â”€â”€ Cross-contract references â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Set once at deployment via setters; immutable thereafter.
 
     address public liquidityVault;
     address public betSlips;
+    address public pricingEngine;
 
-    // ─── Protocol configuration ───────────────────────────────────────────────
+    // â”€â”€â”€ Protocol configuration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     address public admin;
     bool    public paused;
@@ -48,10 +49,10 @@ abstract contract QuadraticCoreStorage is ReentrancyGuard, IQuadraticMarketEvent
     /// @notice ERC20 base token (USDC or equivalent 6-decimal stablecoin).
     IERC20  public baseToken;
 
-    /// @notice Protocol treasury — holds all LP deposits and collected stakes.
+    /// @notice Protocol treasury â€” holds all LP deposits and collected stakes.
     address public treasury;
 
-    // ── ID counters ──────────────────────────────────────────────────────────
+    // â”€â”€ ID counters â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// @notice Monotonically incrementing market ID counter.
     uint64  public nextMarketId;
@@ -59,13 +60,12 @@ abstract contract QuadraticCoreStorage is ReentrancyGuard, IQuadraticMarketEvent
     /// @notice Monotonically incrementing market group ID counter.
     uint64  public nextGroupId;
 
-    /// @notice Monotonically incrementing bet slip ID counter (mirrors BetSlips.nextSlipId).
-    uint64  public nextSlipId;
+    
 
     /// @notice Monotonically incrementing order ID counter.
     uint64  public nextOrderId;
 
-    // ── Timing parameters ──────────────────────────────────────────────────────
+    // â”€â”€ Timing parameters â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// @notice Seconds after oracle proposes result during which admin can override.
     uint256 public challengeWindowSeconds;
@@ -76,7 +76,7 @@ abstract contract QuadraticCoreStorage is ReentrancyGuard, IQuadraticMarketEvent
     /// @notice Seconds after LP requests withdrawal before it can be processed.
     uint256 public withdrawalCooldownSeconds;
 
-    // ── Fee / risk parameters ──────────────────────────────────────────────────
+    // â”€â”€ Fee / risk parameters â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// @notice House margin applied per leg on bet slips (in BPS).
     uint256 public slipHouseMarginBps;
@@ -96,7 +96,7 @@ abstract contract QuadraticCoreStorage is ReentrancyGuard, IQuadraticMarketEvent
     /// @notice House fee on direct single-outcome purchases (in BPS).
     uint256 public buyFeeBps;
 
-    // ── Epoch state ────────────────────────────────────────────────────────────
+    // â”€â”€ Epoch state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     uint64  public currentEpoch;
     uint256 public epochDurationSeconds;
@@ -112,34 +112,32 @@ abstract contract QuadraticCoreStorage is ReentrancyGuard, IQuadraticMarketEvent
     /// @notice Global anti-replay nonce consumed by createMarket oracle signatures.
     uint256 public marketCreationNonce;
 
-    // ── Operators ──────────────────────────────────────────────────────────────
+    // â”€â”€ Operators â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     address[MAX_OPERATORS] internal _operators;
     uint8   public numOperators;
 
-    // ─── Storage mappings ─────────────────────────────────────────────────────
+    // â”€â”€â”€ Storage mappings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     mapping(uint64 => Market)       public markets;
-    mapping(uint64 => Epoch)        public epochs;
-    mapping(uint64 => BetSlip)      public betSlipData;   // slip data; ownership lives in BetSlips
-    mapping(uint64 => MarketGroup)  public marketGroups;
+    mapping(uint64 => Epoch)        public epochs;    mapping(uint64 => MarketGroup)  public marketGroups;
     mapping(uint64 => Order)        public orders;
-    mapping(uint64 => Dispute)      public disputes;
+    mapping(uint64 => GroupDispute) public groupDisputes;
 
-    // ── Bettor positions ───────────────────────────────────────────────────────
+    // â”€â”€ Bettor positions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-    /// @notice Payout shares: bettor → marketId → outcomeId → payout on win.
+    /// @notice Payout shares: bettor â†’ marketId â†’ outcomeId â†’ payout on win.
     mapping(address => mapping(uint64 => mapping(uint8 => uint256))) public outcomeBalances;
 
-    /// @notice Stake record: bettor → marketId → outcomeId → USDC paid (for void refunds).
+    /// @notice Stake record: bettor â†’ marketId â†’ outcomeId â†’ USDC paid (for void refunds).
     mapping(address => mapping(uint64 => mapping(uint8 => uint256))) public outcomeStakes;
 
-    // ── Misc ───────────────────────────────────────────────────────────────────
+    // â”€â”€ Misc â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// @notice USDC locked per open back-order (separate from LP pool).
     uint256 public orderCollateralLocked;
 
-    // ─── Modifiers ────────────────────────────────────────────────────────────
+    // â”€â”€â”€ Modifiers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     modifier onlyAdmin() {
         if (msg.sender != admin) revert Unauthorized();
@@ -161,12 +159,7 @@ abstract contract QuadraticCoreStorage is ReentrancyGuard, IQuadraticMarketEvent
         _;
     }
 
-    modifier onlyBetSlips() {
-        if (msg.sender != betSlips) revert Unauthorized();
-        _;
-    }
-
-    // ─── Internal helpers ─────────────────────────────────────────────────────
+    // â”€â”€â”€ Internal helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// @dev Returns true if `caller` is the admin or a registered operator.
     function _isAuthorized(address caller) internal view returns (bool) {
@@ -190,9 +183,6 @@ abstract contract QuadraticCoreStorage is ReentrancyGuard, IQuadraticMarketEvent
     }
 
     /// @dev Increment and return the next slip ID.
-    function _nextSlipId() internal returns (uint64 id) {
-        id = nextSlipId; unchecked { ++nextSlipId; }
-    }
 
     /// @dev Increment and return the next order ID.
     function _nextOrderId() internal returns (uint64 id) {
@@ -209,7 +199,7 @@ abstract contract QuadraticCoreStorage is ReentrancyGuard, IQuadraticMarketEvent
         if (block.timestamp >= markets[marketId].startTime) revert MarketAlreadyStarted();
     }
 
-    // ─── Exposure cap helpers ─────────────────────────────────────────────────
+    // â”€â”€â”€ Exposure cap helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// @dev Reverts if adding `newPayout` would breach the epoch LP exposure cap.
     function _checkEpochExposure(uint64 epochId, uint256 newPayout) internal view {
@@ -242,7 +232,7 @@ abstract contract QuadraticCoreStorage is ReentrancyGuard, IQuadraticMarketEvent
         if (ep.initialized && !ep.withdrawalsEnabled) revert EpochNotSettled();
     }
 
-    // ─── View helpers ─────────────────────────────────────────────────────────
+    // â”€â”€â”€ View helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// @notice Current USDC balance held by this contract (treasury).
     function treasuryBalance() external view returns (uint256) {
@@ -287,7 +277,7 @@ abstract contract QuadraticCoreStorage is ReentrancyGuard, IQuadraticMarketEvent
         return _isAuthorized(account);
     }
 
-    // ─── Epoch LP state helpers (called by LiquidityVault) ─────────────────────
+    // â”€â”€â”€ Epoch LP state helpers (called by LiquidityVault) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// @notice Called by LiquidityVault.onEpochInit to set LP-side epoch state.
     function setEpochLiquidityParams(

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-// ─── Enums ────────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Enums â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 enum MarketStatus {
     PreOpen,          // Created, not yet open for betting
@@ -9,27 +9,27 @@ enum MarketStatus {
     Suspended,        // Temporarily halted (e.g. live incident)
     AwaitingResult,   // Match finished, waiting for oracle to propose result
     Proposed,         // Oracle proposed outcome, in challenge window
-    Settled,          // Finalized — winners can claim
-    Voided            // Cancelled — all stakes refunded
+    Settled,          // Finalized â€” winners can claim
+    Voided            // Cancelled â€” all stakes refunded
 }
 
 enum MarketMode {
-    FixedOdds,        // Default for sports — oracle-priced, buy_at_odds only
-    Trading           // Prediction market style — direct share trading
+    FixedOdds,        // Default for sports â€” oracle-priced, buy_at_odds only
+    Trading           // Prediction market style â€” direct share trading
 }
 
 /// @notice Type of betting market. Determines same-match parlay correlation discount.
 /// A MarketGroup (real-world match) contains multiple Markets, each with a GroupType.
 /// e.g. Arsenal vs Chelsea group: Market A (FTR), Market B (Goals), Market C (BTTS).
 enum GroupType {
-    FTR,              // 0 — Full-Time Result: Home / Draw / Away
-    Goals,            // 1 — Goals: Over 2.5 / Under 2.5 / Over 3.5 etc.
-    BTTS,             // 2 — Both Teams To Score: Yes / No
-    AsianHandicap,    // 3 — Asian Handicap lines
-    FirstGoal,        // 4 — First Goalscorer
-    CorrectScore,     // 5 — Correct Score
-    HTResult,         // 6 — Half-Time Result
-    PlayerProps       // 7 — Player Props (shots, cards, etc.)
+    FTR,              // 0 â€” Full-Time Result: Home / Draw / Away
+    Goals,            // 1 â€” Goals: Over 2.5 / Under 2.5 / Over 3.5 etc.
+    BTTS,             // 2 â€” Both Teams To Score: Yes / No
+    AsianHandicap,    // 3 â€” Asian Handicap lines
+    FirstGoal,        // 4 â€” First Goalscorer
+    CorrectScore,     // 5 â€” Correct Score
+    HTResult,         // 6 â€” Half-Time Result
+    PlayerProps       // 7 â€” Player Props (shots, cards, etc.)
 }
 
 enum SlipStatus {
@@ -46,15 +46,24 @@ enum OrderSide {
 
 enum DisputeStatus {
     Pending,          // Within challenge window
-    Resolved,         // Challenge window passed — oracle result stands
+    Resolved,         // Challenge window passed - oracle result stands
     Overridden        // Admin corrected the oracle result
+}
+
+/// @notice How a market derives its winning outcome from a finalized match score.
+enum SettlementRule {
+    Manual,           // legacy per-market oracle result
+    FTR,              // home/draw/away from final score
+    BTTS,             // both teams scored: yes/no
+    TotalGoalsOver,   // total goals > settlementLine, where 25 means 2.5
+    TotalGoalsUnder   // total goals < settlementLine, where 25 means 2.5
 }
 
 /// @notice Sport categories LPs vote on each epoch.
 ///         Admin creates markets only within the winning category/categories.
 ///         Voting weight = LP share balance at time of vote.
 enum SportCategory {
-    Football,         // 0 — Soccer / Association Football
+    Football,         // 0 â€” Soccer / Association Football
     Tennis,           // 1
     Basketball,       // 2
     AmericanFootball, // 3
@@ -62,7 +71,7 @@ enum SportCategory {
     Other             // 5
 }
 
-// ─── Structs ──────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Structs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 uint256 constant MAX_OUTCOMES         = 8;
 uint256 constant MAX_SLIP_LEGS        = 8;
@@ -74,17 +83,27 @@ uint256 constant SETTLE_REWARD_BPS   = 10;           // caller reward for settle
 uint8   constant NUM_SPORT_CATEGORIES = 6;            // length of the SportCategory enum
 
 /// @notice A single real-world match/event that groups multiple betting markets.
-/// e.g. "Arsenal vs Chelsea — Jun 14 2026" contains FTR market, Goals market, BTTS market.
+/// e.g. "Arsenal vs Chelsea â€” Jun 14 2026" contains FTR market, Goals market, BTTS market.
 struct MarketGroup {
     uint64   groupId;
     address  creator;
-    string   title;              // "Arsenal vs Chelsea — Jun 14 2026"
+    string   title;              // "Arsenal vs Chelsea â€” Jun 14 2026"
     uint256  eventStartTime;
     uint256  maxGroupExposure;   // LP-backed max payout obligation for this event
     uint256  currentExposure;    // running payout liability linked to this event
     uint8    numMarkets;
     uint64[MAX_GROUP_MKTS] marketIds;  // IDs of all markets in this group
     bool     exists;
+
+    // Group-level state-space pricing for the 3-market football book.
+    bool     pricingInitialized;
+    uint256  pricingB;           // LMSR depth parameter, 1e18-scaled
+    int256[9] stateQ;            // cumulative state shares, 1e18-scaled
+
+    // Group-level canonical settlement. One final score settles all score-derived child markets.
+    uint16   homeScore;
+    uint16   awayScore;
+    bool     resultFinalized;
 }
 
 /// @notice An individual betting market within a MarketGroup.
@@ -96,54 +115,87 @@ struct Market {
     MarketStatus status;
     uint8       numOutcomes;
 
-    // ── Semi-Static Fixed Odds (replaces LMSR q_values + lmsr_b) ──────────────
-    uint256[MAX_OUTCOMES] currentOdds;    // decimal odds × ODDS_PRECISION; set by oracle
+    // â”€â”€ Semi-Static Fixed Odds (replaces LMSR q_values + lmsr_b) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    uint256[MAX_OUTCOMES] currentOdds;    // decimal odds Ã— ODDS_PRECISION; set by oracle
     uint256[MAX_OUTCOMES] oddsAnchor;     // consensus odds at market creation (Pinnacle/API)
-    uint256 maxDeviationBps;              // on-chain guarantee: currentOdds ≤ anchor ± this
+    uint256 maxDeviationBps;              // on-chain guarantee: currentOdds â‰¤ anchor Â± this
     uint256[MAX_OUTCOMES] volumeCap;      // per-outcome max payout liability (LP-backed)
     uint256[MAX_OUTCOMES] volumeFilled;   // per-outcome running payout liability
     uint256[MAX_OUTCOMES] slipVolumeFilled; // per-outcome liability from active multi-leg slips
     uint256 oddsLastUpdated;              // block.timestamp of last updateOdds call
 
-    // ── Settlement ─────────────────────────────────────────────────────────────
+    // â”€â”€ Settlement â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     uint256  exposure;
     uint256  settlementTime;
     uint8    winningOutcome;
 
-    // ── Metadata ───────────────────────────────────────────────────────────────
+    // â”€â”€ Metadata â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     string   title;
     string   description;
-    uint8    category;           // sport category byte (0=football, 1=tennis, …)
+    uint8    category;           // sport category byte (0=football, 1=tennis, â€¦)
 
-    // ── Market Group membership ────────────────────────────────────────────────
+    // â”€â”€ Market Group membership â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     uint64   groupId;
     bool     hasGroup;
     uint8    groupMarketIndex;   // index of this market within its group's marketIds array
-    GroupType marketType;        // what kind of bet this is → drives parlay discount
+    GroupType marketType;        // what kind of bet this is - drives parlay discount
 
-    // ── Epoch ──────────────────────────────────────────────────────────────────
+    // Score-derived settlement metadata. Outcome IDs are configurable because markets may
+    // list outcomes in different orders, e.g. [Away, Draw, Home] instead of [Home, Draw, Away].
+    SettlementRule settlementRule;
+    uint16   settlementLine;     // total-goals line in tenths: 25 = 2.5, 35 = 3.5
+    uint8    homeOutcomeId;
+    uint8    drawOutcomeId;
+    uint8    awayOutcomeId;
+    uint8    yesOutcomeId;
+    uint8    noOutcomeId;
+    uint8    overOutcomeId;
+    uint8    underOutcomeId;
+    // â”€â”€ Epoch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     uint64   epochId;
     bool     settledInEpoch;
 
-    // ── Per-market financials ──────────────────────────────────────────────────
+    // â”€â”€ Per-market financials â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     uint256  backing;            // sum of all stakes collected on this market
     uint256  lockedPayout;       // total outstanding redemption liability
+}
+
+/// @notice Compact market view for slip validation and settlement checks.
+struct MarketSlipView {
+    MarketStatus status;
+    uint256 startTime;
+    uint8 numOutcomes;
+    uint64 epochId;
+    uint64 groupId;
+    GroupType marketType;
+    uint256[MAX_OUTCOMES] currentOdds;
+    uint256[MAX_OUTCOMES] volumeCap;
+    uint256[MAX_OUTCOMES] volumeFilled;
+    uint256[MAX_OUTCOMES] slipVolumeFilled;
+    uint8 winningOutcome;
+}
+
+/// @notice Compact epoch view for slip validation.
+struct EpochSlipView {
+    uint256 totalLiquidityAdded;
+    uint256 maxExposureMultiplierBps;
+    uint256 totalLockedPayouts;
 }
 
 /// @notice Time-bounded LP period. All markets within an epoch share the LP pool.
 ///
 /// Timeline:
 ///   [initEpoch called]
-///     → deposit window opens  (LPs deposit USDC, receive shares)
+///     â†’ deposit window opens  (LPs deposit USDC, receive shares)
 ///   [startTime]
-///     → deposit window CLOSES (no more deposits)
-///     → markets open for betting
+///     â†’ deposit window CLOSES (no more deposits)
+///     â†’ markets open for betting
 ///   [endTime]
-///     → no new bets accepted
-///     → oracle settles markets
+///     â†’ no new bets accepted
+///     â†’ oracle settles markets
 ///   [allMarketsSettled == true]
-///     → withdrawalsEnabled flipped by advanceEpoch
-///     → LPs requestWithdraw → processWithdrawal (after cooldown)
+///     â†’ withdrawalsEnabled flipped by advanceEpoch
+///     â†’ LPs requestWithdraw â†’ processWithdrawal (after cooldown)
 struct Epoch {
     uint64   epochId;
     uint256  startTime;           // epoch trading begins; deposit window closes here
@@ -157,8 +209,8 @@ struct Epoch {
     bool     initialized;            // guards against double-init (fixes epoch-0 bug)
     uint256  lpSharesAtClose;
     // Risk controls (from MD files)
-    uint256  maxExposureMultiplierBps; // e.g. 15_000 = 1.5× → max LP loss = 50% of deposit
-    uint256  totalLockedPayouts;       // running payout obligations; must stay ≤ maxExposure
+    uint256  maxExposureMultiplierBps; // e.g. 15_000 = 1.5Ã— â†’ max LP loss = 50% of deposit
+    uint256  totalLockedPayouts;       // running payout obligations; must stay â‰¤ maxExposure
     // Category governance
     uint8    winningSportCategory;     // SportCategory with most vote-weight this epoch
 }
@@ -167,14 +219,14 @@ struct Epoch {
 struct SlipLeg {
     uint64  marketId;
     uint8   outcomeId;
-    uint256 odds;            // odds × ODDS_PRECISION, locked at bet placement
+    uint256 odds;            // odds Ã— ODDS_PRECISION, locked at bet placement
 }
 
 /// @notice Input descriptor for one leg when calling placeSlip.
 struct PlaceSlipLeg {
     uint64  marketId;
     uint8   outcomeId;
-    uint256 minOdds;         // per-leg slippage guard — reverts if current odds < this
+    uint256 minOdds;         // per-leg slippage guard â€” reverts if current odds < this
 }
 
 /// @notice Full input for placeSlip (avoids stack-too-deep on many params).
@@ -183,6 +235,29 @@ struct PlaceSlipParams {
     uint8   numLegs;
     uint256 totalStake;         // single USDC amount staked on the whole accumulator
     uint256 minCombinedOdds;    // overall slippage guard on final combined odds
+}
+
+struct SlipQuote {
+    uint64 epochId;
+    uint8 numLegs;
+    uint256 totalStake;
+    uint256 combinedOdds;
+    uint256 potentialPayout;
+    uint256 houseMarginBps;
+    uint256 discountBps;
+    uint256 crossBonusBps;
+}
+
+struct SlipStatusView {
+    SlipStatus status;
+    address owner;
+    bool pending;
+    bool won;
+    bool hasVoid;
+    bool hasLost;
+    bool claimable;
+    bool refundable;
+    uint256 potentialPayout;
 }
 
 /// @notice Multi-leg accumulator bet. All legs must win for payout.
@@ -204,7 +279,7 @@ struct BetSlip {
     uint256     houseMarginBps;  // margin captured at placement
     uint256     discountBps;     // correlation discount applied (FULL_BPS = 10_000 = no discount)
     uint256     crossBonusBps;   // cross-match bonus applied
-    uint256     potentialPayout; // totalStake × combinedOdds / ODDS_PRECISION
+    uint256     potentialPayout; // totalStake Ã— combinedOdds / ODDS_PRECISION
     SlipStatus  status;
     uint256     createdAt;
 }
@@ -227,9 +302,23 @@ struct Order {
 struct WithdrawalRequest {
     uint256  shares;
     uint256  requestedAt;
-    uint256  snapshotNav;   // NAV (× ODDS_PRECISION) at request time — withdrawal uses min(snapshot, current)
+    uint256  snapshotNav;   // NAV (Ã— ODDS_PRECISION) at request time â€” withdrawal uses min(snapshot, current)
     uint64   epochId;
     bool     exists;
+
+}
+
+struct LPStats {
+    uint256 shares;
+    uint256 totalShares;
+    uint256 nav;
+    uint256 positionValue;
+    uint256 freeLiquidity;
+    uint256 pendingWithdrawalShares;
+    uint256 withdrawalAvailableAt;
+    uint64 withdrawalEpochId;
+    bool withdrawalPending;
+    bool withdrawalEpochSettled;
 }
 
 /// @notice Pending LP deposit waiting for next epoch activation.
@@ -239,6 +328,7 @@ struct PendingLiquidity {
     uint256  activationTime;
     uint64   epochId;
     bool     exists;
+
 }
 
 /// @notice Oracle-proposed settlement with challenge window.
@@ -251,7 +341,19 @@ struct Dispute {
     DisputeStatus status;
 }
 
-// ─── Events ───────────────────────────────────────────────────────────────────
+/// @notice Oracle-proposed canonical final score for a whole MarketGroup.
+struct GroupDispute {
+    uint64        groupId;
+    uint16        homeScore;
+    uint16        awayScore;
+    address       proposer;
+    uint256       createdAt;
+    uint256       challengeDeadline;
+    DisputeStatus status;
+    bool          exists;
+}
+
+// â”€â”€â”€ Events â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 interface IQuadraticMarketEvents {
     // Admin
@@ -314,6 +416,9 @@ interface IQuadraticMarketEvents {
     // Settlement
     event ResultProposed(uint64 indexed marketId, uint8 outcome, address indexed oracle);
     event ResultOverridden(uint64 indexed marketId, uint8 correctedOutcome, address indexed admin);
+    event GroupResultProposed(uint64 indexed groupId, uint16 homeScore, uint16 awayScore, address indexed oracle);
+    event GroupResultOverridden(uint64 indexed groupId, uint16 homeScore, uint16 awayScore, address indexed admin);
+    event GroupFinalized(uint64 indexed groupId, uint16 homeScore, uint16 awayScore);
     event MarketFinalized(uint64 indexed marketId, uint8 winningOutcome);
     event PayoutClaimed(uint64 indexed marketId, address indexed bettor, uint256 amount);
 
@@ -341,19 +446,28 @@ struct CreateMarketParams {
     string      title;            // e.g. "Full-Time Result"
     string      description;      // extended description
     uint256     startTime;        // unix timestamp when the event kicks off (bets close here)
-    uint8       numOutcomes;      // 2–8
-    GroupType   marketType;       // FTR / Goals / BTTS / AsianHandicap / …
+    uint8       numOutcomes;      // 2â€“8
+    GroupType   marketType;       // FTR / Goals / BTTS / AsianHandicap / â€¦
     uint8       category;         // uint8(SportCategory)
-    uint256[MAX_OUTCOMES] oddsAnchor;  // reference odds signed by oracle (× ODDS_PRECISION)
-    uint256     maxDeviationBps;  // max oracle drift from anchor (0 → 10% default)
-    uint256[MAX_OUTCOMES] volumeCap;   // per-outcome payout cap (0 → auto from epoch LP pool)
+    uint256[MAX_OUTCOMES] oddsAnchor;  // reference odds signed by oracle (Ã— ODDS_PRECISION)
+    uint256     maxDeviationBps;  // max oracle drift from anchor (0 â†’ 10% default)
+    uint256[MAX_OUTCOMES] volumeCap;   // per-outcome payout cap (0 -> auto from epoch LP pool)
+    SettlementRule settlementRule;      // how this market is settled from a group score
+    uint16      settlementLine;         // total-goals line in tenths: 25 = 2.5
+    uint8       homeOutcomeId;          // FTR home outcome id
+    uint8       drawOutcomeId;          // FTR draw outcome id
+    uint8       awayOutcomeId;          // FTR away outcome id
+    uint8       yesOutcomeId;           // BTTS yes outcome id
+    uint8       noOutcomeId;            // BTTS no outcome id
+    uint8       overOutcomeId;          // totals over outcome id
+    uint8       underOutcomeId;         // totals under outcome id
     uint256     sigDeadline;      // oracle sig expires after this timestamp
     bytes       oracleSig;        // oracle ECDSA sig over (params + chainId + address(this))
 }
 
 /// @notice Struct passed to updateConfig to avoid stack-too-deep on many params.
 ///         Pass type(uint256).max (or address(type(uint160).max) for oracle) to leave a field unchanged.
-///         Pass the desired value — including 0 — to update a field.
+///         Pass the desired value â€” including 0 â€” to update a field.
 struct ConfigUpdate {
     uint256 maxMarketExposure;
     uint256 challengeWindowSeconds;
@@ -369,7 +483,7 @@ struct ConfigUpdate {
     address oracle;
 }
 
-// ─── Errors ───────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Errors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 interface IQuadraticMarketErrors {
     error Unauthorized();

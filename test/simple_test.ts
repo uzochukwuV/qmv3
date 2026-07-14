@@ -14,15 +14,12 @@ describe("Simple test", async function () {
     const core = await viem.deployContract("Core", [
       token.address, oracle.account.address, parseUnits("100000", 6),
     ]);
-    const vault = await viem.deployContract("LiquidityVault");
-    const slips = await viem.deployContract("BetSlips");
+    const vault = await viem.deployContract("LiquidityVault");
 
     await vault.write.setCore([core.address]);
-    await slips.write.setCore([core.address]);
     await core.write.setLiquidityVault([vault.address]);
-    await core.write.setBetSlips([slips.address]);
 
-    return { admin, oracle, lp, bettor, publicClient, token, core, vault, slips };
+    return { admin, oracle, lp, bettor, publicClient, token, core, vault };
   }
 
   it("deploy three contracts - should call openMarket", async function () {

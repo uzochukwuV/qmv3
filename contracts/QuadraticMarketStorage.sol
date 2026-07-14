@@ -267,10 +267,9 @@ abstract contract QuadraticMarketStorage is ReentrancyGuard, IQuadraticMarketEve
     /// @notice USDC value of an LP's entire share balance at current NAV.
     function lpValue(address lp) external view returns (uint256) {
         if (totalLpShares == 0) return 0;
-        return (lpShares[lp] * baseToken.balanceOf(address(this))) / totalLpShares;
+        return (lpShares[lp] * freeLiquidity()) / totalLpShares;
     }
 
-    /// @notice Maximum total payout obligation allowed for an epoch given deposits.
     function epochMaxExposure(uint64 epochId) external view returns (uint256) {
         Epoch storage ep = epochs[epochId];
         return LibOdds.maxEpochExposure(ep.totalLiquidityAdded, ep.maxExposureMultiplierBps);

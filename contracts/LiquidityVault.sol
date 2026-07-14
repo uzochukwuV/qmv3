@@ -48,17 +48,12 @@ contract LiquidityVault is VaultStorage {
     }
 
     /// @notice Called by Core.advanceEpoch() to enable withdrawals for the completed epoch.
+    /// @notice Called by Core.advanceEpoch() to enable withdrawals for the completed epoch.
     function onAdvanceEpoch(uint64 prevEpochId) external onlyCore {
         epochWithdrawalsEnabled[prevEpochId] = true;
+        epochNavSnapshot[prevEpochId] = lpNav();
     }
 
-    // ─── Deposit ──────────────────────────────────────────────────────────────
-
-    /// @notice Deposit USDC into the LP vault for the current epoch.
-    ///         Only callable during the deposit window (before epoch.startTime).
-    ///         Mints LP shares at current NAV using the virtual-offset ERC4626 formula.
-    ///
-    /// @param amount  USDC amount to deposit (in base-token units, 6 decimals).
     function addLiquidity(uint256 amount) external nonReentrant whenNotPaused {
         if (amount == 0) revert InvalidAmount();
         if (core == address(0)) revert Unauthorized();
@@ -97,6 +92,11 @@ contract LiquidityVault is VaultStorage {
     ///         A cooldown period must pass before processWithdrawal() executes.
     ///
     /// @param shares  Number of LP shares to redeem.
+    /// @notice Queue an LP withdrawal for `shares` of the LP vault.
+    ///         Requires at least one epoch to have fully settled (anyEpochSettled).
+    ///         A cooldown period must pass before processWithdrawal() executes.
+    ///
+    /// @param shares  Number of LP shares to redeem.
     function requestWithdraw(uint256 shares) external whenNotPaused {
         if (shares == 0) revert InvalidAmount();
         if (lpShares[msg.sender] < shares) revert InsufficientLiquidity();
@@ -104,8 +104,13 @@ contract LiquidityVault is VaultStorage {
         if (core == address(0)) revert Unauthorized();
 
         ICore c = ICore(core);
-        // Must have at least one settled epoch
-        if (!c.hasAnyEpochSettled()) revert EpochNotSettled();
+        if (!c.anyEpochSettled()) revert EpochNotSettled();
+
+        uint64 currentEpoch = c.currentEpoch();
+        Epoch memory currentEpochData = c.epochs(currentEpoch);
+        if (currentEpochData.initialized && !currentEpochData.withdrawalsEnabled) {
+            revert EpochNotSettled();
+        }
 
         uint64 settledEpoch = c.lastSettledEpoch();
 
@@ -131,9 +136,13 @@ contract LiquidityVault is VaultStorage {
         if (!req.exists) revert NoPendingWithdrawal();
 
         ICore c = ICore(core);
-        // Can only withdraw once the request's epoch has withdrawals enabled
+        uint64 currentEpoch = c.currentEpoch();
+        Epoch memory currentEpochData = c.epochs(currentEpoch);
+        if (currentEpochData.initialized && !currentEpochData.withdrawalsEnabled) {
+            revert EpochNotSettled();
+        }
         if (!epochWithdrawalsEnabled[req.epochId]) revert EpochNotSettled();
-        if (block.timestamp < req.requestedAt + c.getWithdrawalCooldownSeconds()) {
+        if (block.timestamp < req.requestedAt + c.withdrawalCooldownSeconds()) {
             revert WithdrawalCooldownActive();
         }
 
@@ -156,13 +165,6 @@ contract LiquidityVault is VaultStorage {
         emit WithdrawalProcessed(msg.sender, amount, shares);
     }
 
-    // ─── Category Voting ──────────────────────────────────────────────────────
-
-    /// @notice Vote on which sport category should have markets in the next epoch.
-    ///         Vote weight = caller's current LP share balance.
-    ///         One vote per LP per epoch (changing vote not supported).
-    ///
-    /// @param category  The SportCategory to vote for.
     function voteCategory(SportCategory category) external whenNotPaused {
         if (lpShares[msg.sender] == 0) revert InsufficientLiquidity();
         if (core == address(0)) revert Unauthorized();
@@ -185,26 +187,51 @@ contract LiquidityVault is VaultStorage {
     // ─── LP Views ─────────────────────────────────────────────────────────────
 
     /// @notice Current LP share NAV: USDC value per share (scaled by ODDS_PRECISION).
-    ///         Computed from Core's treasury balance and Vault's total LP shares.
+    ///         Current epoch values are frozen to the most recent settlement snapshot.
     function lpNav() public view returns (uint256) {
         if (core == address(0)) return ODDS_PRECISION;
+
+        ICore c = ICore(core);
+        uint64 currentEpoch = c.currentEpoch();
+        Epoch memory currentEpochData = c.epochs(currentEpoch);
+        if (currentEpochData.initialized && !currentEpochData.withdrawalsEnabled) {
+            uint256 snapshotNav = epochNavSnapshot[c.lastSettledEpoch()];
+            if (snapshotNav != 0) return snapshotNav;
+        }
+
         if (totalLpShares == 0) return ODDS_PRECISION;
-        // Use free liquidity (balance - locked payouts) for NAV calculation
-        uint256 freeBal = ICore(core).freeLiquidity();
+        uint256 freeBal = c.freeLiquidity();
         return (freeBal * ODDS_PRECISION) / totalLpShares;
     }
 
     /// @notice USDC value of an LP's entire share balance at current NAV.
     function lpValue(address lp) external view returns (uint256) {
         if (totalLpShares == 0 || core == address(0)) return 0;
-        IERC20 tok = ICore(core).baseToken();
-        uint256 bal = tok.balanceOf(core);
-        return (lpShares[lp] * bal) / totalLpShares;
+        return (lpShares[lp] * lpNav()) / ODDS_PRECISION;
     }
 
-    /// @notice LP shares held by an address.
     function lpSharesOf(address lp) external view returns (uint256) {
         return lpShares[lp];
+    }
+
+    /// @notice Return position value, NAV, liquidity, and withdrawal state in one call.
+    function getLPStats(address lp) external view returns (LPStats memory stats) {
+        uint256 nav = lpNav();
+        uint256 shares = lpShares[lp];
+        WithdrawalRequest storage req = withdrawalRequests[lp];
+        uint256 cooldown = core == address(0) ? 0 : ICore(core).withdrawalCooldownSeconds();
+        stats = LPStats({
+            shares: shares,
+            totalShares: totalLpShares,
+            nav: nav,
+            positionValue: (shares * nav) / ODDS_PRECISION,
+            freeLiquidity: core == address(0) ? 0 : ICore(core).freeLiquidity(),
+            pendingWithdrawalShares: req.shares,
+            withdrawalAvailableAt: req.exists ? req.requestedAt + cooldown : 0,
+            withdrawalEpochId: req.epochId,
+            withdrawalPending: req.exists,
+            withdrawalEpochSettled: req.exists && epochWithdrawalsEnabled[req.epochId]
+        });
     }
 
     // ─── Epoch LP state reads (called by Core) ─────────────────────────────────

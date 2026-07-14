@@ -55,6 +55,7 @@ abstract contract VaultStorage is ReentrancyGuard, IQuadraticMarketEvents, IQuad
     mapping(uint64 => bool)    public epochInitialized;
     mapping(uint64 => bool)    public epochWithdrawalsEnabled;
     mapping(uint64 => uint256) public epochLockedPayouts;
+    mapping(uint64 => uint256) public epochNavSnapshot;
 
     // ─── Category governance ──────────────────────────────────────────────────
 

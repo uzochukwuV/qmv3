@@ -1,8 +1,8 @@
 import React, { useRef, useState } from "react";
-import { liveMatches } from "@/lib/sportsData";
+import { liveMatches as defaultLiveMatches } from "@/lib/sportsData";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 
-export default function LiveMatches({ onOddsClick, selectedOdds }) {
+export default function LiveMatches({ onOddsClick, selectedOdds, matches = defaultLiveMatches }) {
   const scrollRef = useRef(null);
   const [animatingId, setAnimatingId] = useState(null);
 
@@ -36,7 +36,7 @@ export default function LiveMatches({ onOddsClick, selectedOdds }) {
           <span className="w-2 h-2 rounded-full bg-red-500 live-pulse" />
           <h2 className="font-inter text-lg font-bold text-midnight">LIVE NOW</h2>
           <span className="bg-sunset-orange/10 text-sunset-orange font-inter text-xs font-semibold px-2.5 py-0.5 rounded-full">
-            {liveMatches.length} Live
+            {matches.length} Live
           </span>
         </div>
         <div className="flex gap-1">
@@ -50,7 +50,7 @@ export default function LiveMatches({ onOddsClick, selectedOdds }) {
       </div>
 
       <div ref={scrollRef} className="flex gap-3 overflow-x-auto hide-scrollbar pb-1">
-        {liveMatches.map((match) => (
+        {matches.map((match) => (
           <div
             key={match.id}
             className="bg-slate-mist rounded-lg p-4 min-w-[272px] shrink-0 flex flex-col"
@@ -58,14 +58,14 @@ export default function LiveMatches({ onOddsClick, selectedOdds }) {
             <div className="flex items-center gap-1.5 mb-2">
               <span className="w-1.5 h-1.5 rounded-full bg-red-500 live-pulse" />
               <span className="font-inter text-[12px] text-silver-ash">
-                {match.league} â€¢ {match.minute}
+                {match.league} • {match.minute}
               </span>
             </div>
             <div className="font-inter text-[15px] font-bold text-midnight mb-1">
               {match.home} vs {match.away}
             </div>
             <div className="font-inter text-2xl font-bold text-sunset-orange text-center my-2">
-              {match.homeScore} â€” {match.awayScore}
+              {match.homeScore} — {match.awayScore}
             </div>
             <div className="flex gap-2 mt-auto">
               {Object.entries(match.odds).map(([market, odds]) => {

@@ -122,6 +122,55 @@ contract BetSlips is SlipStorage {
         return slipEpochLockedPayouts[slipId];
     }
 
+    /// @notice Quote a slip using the same pricing and capacity checks as placement.
+    function quoteSlip(PlaceSlipParams calldata p) external view returns (SlipQuote memory quote) {
+        if (core == address(0)) revert Unauthorized();
+        ICore c = ICore(core);
+        if (c.epochPaused()) revert ProtocolIsPaused();
+        uint8 numLegs = p.numLegs;
+        if (numLegs < 1 || numLegs > MAX_SLIP_LEGS) revert InvalidOutcomeId();
+        if (p.totalStake == 0 || p.totalStake > c.maxSingleBet()) revert InvalidAmount();
+
+        uint64[] memory mIds = new uint64[](numLegs);
+        uint8[] memory oIds = new uint8[](numLegs);
+        uint256[] memory oVals = new uint256[](numLegs);
+        uint64[] memory gIds = new uint64[](numLegs);
+        GroupType[] memory gTypes = new GroupType[](numLegs);
+        bool[] memory hasGrp = new bool[](numLegs);
+        OddsResult memory result = _collectAndPrice(c, p, numLegs, mIds, oIds, oVals, gIds, gTypes, hasGrp);
+        uint256 payout = (p.totalStake * result.finalOdds) / ODDS_PRECISION;
+        _checkPayoutAndCaps(c, result.epochId, payout, numLegs, mIds, oIds);
+
+        quote = SlipQuote({
+            epochId: result.epochId,
+            numLegs: numLegs,
+            totalStake: p.totalStake,
+            combinedOdds: result.finalOdds,
+            potentialPayout: payout,
+            houseMarginBps: result.marginBps,
+            discountBps: result.discountBps,
+            crossBonusBps: result.crossBonus
+        });
+    }
+
+    /// @notice Return lifecycle, settlement, and claim state in one call.
+    function getSlipStatusView(uint64 slipId) external view returns (SlipStatusView memory statusView) {
+        BetSlip storage slip = betSlips[slipId];
+        (bool pending, bool won, bool hasVoid, bool hasLost) = slipResult(slipId);
+        bool active = slip.status == SlipStatus.Active;
+        statusView = SlipStatusView({
+            status: slip.status,
+            owner: slipOwner[slipId],
+            pending: pending,
+            won: won,
+            hasVoid: hasVoid,
+            hasLost: hasLost,
+            claimable: active && won,
+            refundable: active && hasVoid && !hasLost,
+            potentialPayout: slip.potentialPayout
+        });
+    }
+
 
     // ─── Place Slip ───────────────────────────────────────────────────────────
 
@@ -180,14 +229,15 @@ contract BetSlips is SlipStorage {
         ICore c, uint64 epochId, uint256 payout, uint8 numLegs,
         uint64[] memory mIds, uint8[] memory oIds
     ) internal view {
-        uint256 maxExp = c.maxEpochExposure(epochId);
-        uint256 locked = c.getEpochTotalLockedPayouts(epochId);
+        EpochSlipView memory ep = c.getEpochSlipView(epochId);
+        uint256 maxExp = LibOdds.maxEpochExposure(ep.totalLiquidityAdded, ep.maxExposureMultiplierBps);
+        uint256 locked = ep.totalLockedPayouts;
         if (maxExp == 0) revert InsufficientLiquidity();
         if (locked + payout > maxExp) revert VolumeCapExceeded();
         for (uint8 i = 0; i < numLegs; ) {
-            uint256 filled = c.getMarketVolumeFilled(mIds[i], oIds[i])
-                           + c.getMarketSlipVolumeFilled(mIds[i], oIds[i]);
-            uint256 cap = c.getMarketVolumeCap(mIds[i], oIds[i]);
+            MarketSlipView memory m = c.getMarketSlipView(mIds[i]);
+            uint256 filled = m.volumeFilled[oIds[i]] + m.slipVolumeFilled[oIds[i]];
+            uint256 cap = m.volumeCap[oIds[i]];
             if (!LibOdds.withinVolumeCap(filled, cap, payout)) revert VolumeCapExceeded();
             unchecked { ++i; }
         }
@@ -198,13 +248,13 @@ contract BetSlips is SlipStorage {
         ICore c, PlaceSlipParams calldata p, uint8 numLegs,
         uint64[] memory mIds, uint8[] memory oIds, uint256[] memory oVals,
         uint64[] memory gIds, GroupType[] memory gTypes, bool[] memory hasGrp
-    ) internal returns (OddsResult memory result) {
+    ) internal view returns (OddsResult memory result) {
         uint256 combinedOdds = ODDS_PRECISION;
         for (uint8 i = 0; i < numLegs; ) {
             uint64 mid = p.legs[i].marketId;
             uint8 oid = p.legs[i].outcomeId;
             uint256 minOd = p.legs[i].minOdds;
-            Market memory m = c.getMarket(mid);
+            MarketSlipView memory m = c.getMarketSlipView(mid);
             if (m.status != MarketStatus.Open) revert MarketNotOpen();
             if (block.timestamp >= m.startTime) revert MarketAlreadyStarted();
             if (oid >= m.numOutcomes) revert InvalidOutcomeId();
@@ -278,12 +328,10 @@ contract BetSlips is SlipStorage {
         uint8 numLegs = slip.numLegs;
         for (uint8 i = 0; i < numLegs; ) {
             SlipLeg storage leg = slip.legs[i];
-            MarketStatus status = c.getMarketStatus(leg.marketId);
-            uint8 winningOutcome = c.getMarketWinningOutcome(leg.marketId);
-
-            if      (status == MarketStatus.Voided)  { hasVoid = true; }
-            else if (status == MarketStatus.Settled)  {
-                if (winningOutcome != leg.outcomeId) hasLost = true;
+            MarketSlipView memory m = c.getMarketSlipView(leg.marketId);
+            if      (m.status == MarketStatus.Voided)  { hasVoid = true; }
+            else if (m.status == MarketStatus.Settled)  {
+                if (m.winningOutcome != leg.outcomeId) hasLost = true;
             } else { pending = true; }
             unchecked { ++i; }
         }
@@ -324,7 +372,7 @@ contract BetSlips is SlipStorage {
             unchecked { ++i; }
         }
         c.unlockPayout(slip.epochId, payout);
-        _baseToken().safeTransfer(owner, payout);
+        ICore(core).paySlipRecipient(owner, payout);
         emit SlipClaimed(slipId, owner, payout);
     }
 
@@ -353,7 +401,7 @@ contract BetSlips is SlipStorage {
         slipEpochLockedPayouts[slipId] = 0;
 
         ICore(core).unlockPayout(slip.epochId, slip.potentialPayout);
-        _baseToken().safeTransfer(owner, stake);
+        ICore(core).paySlipRecipient(owner, stake);
         emit SlipVoidRefund(slipId, owner, stake);
     }
 
@@ -392,7 +440,7 @@ contract BetSlips is SlipStorage {
             unchecked { ++i; }
         }
         c.unlockPayout(slip.epochId, payout);
-        _baseToken().safeTransfer(owner, stake);
+        ICore(core).paySlipRecipient(owner, stake);
         emit SlipCancelled(slipId, owner);
     }
 
@@ -428,7 +476,7 @@ contract BetSlips is SlipStorage {
         // Caller reward: SETTLE_REWARD_BPS of payout (incentivizes keeper bots)
         uint256 reward = (payout * SETTLE_REWARD_BPS) / BPS;
         if (reward > 0) {
-            _baseToken().safeTransfer(msg.sender, reward);
+            ICore(core).paySlipRecipient(msg.sender, reward);
         }
 
         emit SlipLostSettled(slipId, owner);

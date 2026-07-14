@@ -1,10 +1,10 @@
 import React from "react";
-import { marketTabs } from "@/lib/sportsData";
+import { marketTabs as defaultMarketTabs } from "@/lib/sportsData";
 
-export default function MarketTabs({ activeMarket, setActiveMarket }) {
+export default function MarketTabs({ activeMarket, setActiveMarket, tabs = defaultMarketTabs }) {
   return (
     <div className="flex gap-2 overflow-x-auto hide-scrollbar pb-1 mb-4">
-      {marketTabs.map((tab) => (
+      {tabs.map((tab) => (
         <button
           key={tab}
           onClick={() => setActiveMarket(tab)}

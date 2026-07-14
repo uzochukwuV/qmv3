@@ -33,11 +33,13 @@ interface ICore {
     function decrementSlipVolume(uint64 marketId, uint8 outcomeId, uint256 amount) external;
 
     // ── Market reads (needed by BetSlips to validate legs) ─────────────────
-    function getMarket(uint64 marketId) external view returns (Market memory);
+    function markets(uint64 marketId) external view returns (Market memory);
+    function epochs(uint64 epochId) external view returns (Epoch memory);
     function getMarketStatus(uint64 marketId) external view returns (MarketStatus);
     function getMarketCurrentOdds(uint64 marketId, uint8 outcomeId) external view returns (uint256);
     function getMarketEpochId(uint64 marketId) external view returns (uint64);
     function getMarketStartTime(uint64 marketId) external view returns (uint256);
+    function getMarketNumOutcomes(uint64 marketId) external view returns (uint8);
     function getMarketGroupId(uint64 marketId) external view returns (uint64);
     function getMarketType(uint64 marketId) external view returns (GroupType);
     function getMarketVolumeCap(uint64 marketId, uint8 outcomeId) external view returns (uint256);
@@ -48,6 +50,9 @@ interface ICore {
     function getMarketMaxGroupExposure(uint64 groupId) external view returns (uint256);
     function getGroupNumMarkets(uint64 groupId) external view returns (uint16);
     function getGroupMarketId(uint64 groupId, uint8 index) external view returns (uint64);
+
+    function getMarketSlipView(uint64 marketId) external view returns (MarketSlipView memory);
+    function getEpochSlipView(uint64 epochId) external view returns (EpochSlipView memory);
 
     // ── Epoch reads ─────────────────────────────────────────────────────────
     function getEpochInitialized(uint64 epochId) external view returns (bool);
@@ -62,8 +67,8 @@ interface ICore {
     function getEpochNumSettledMarkets(uint64 epochId) external view returns (uint16);
     function currentEpoch() external view returns (uint64);
     function lastSettledEpoch() external view returns (uint64);
-    function hasAnyEpochSettled() external view returns (bool);
-    function getWithdrawalCooldownSeconds() external view returns (uint256);
+    function anyEpochSettled() external view returns (bool);
+    function withdrawalCooldownSeconds() external view returns (uint256);
 
     // ── Epoch exposure helpers ───────────────────────────────────────────────
     function maxEpochExposure(uint64 epochId) external view returns (uint256);
@@ -74,6 +79,7 @@ interface ICore {
     // ── Core → Vault cross-calls ─────────────────────────────────────────────
     function setEpochLiquidityParams(uint64 epochId, uint256 totalLiquidityAdded, uint256 maxExposureMultiplierBps) external;
     function withdrawFromVault(address lp, uint256 amount) external;
+    function paySlipRecipient(address recipient, uint256 amount) external;
 
     // ── Global risk params (needed by BetSlips) ─────────────────────────────
     function slipHouseMarginBps() external view returns (uint256);
