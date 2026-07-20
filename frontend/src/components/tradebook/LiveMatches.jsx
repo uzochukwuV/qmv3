@@ -1,33 +1,46 @@
-import React, { useRef, useState } from "react";
-import { liveMatches as defaultLiveMatches } from "@/lib/sportsData";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import React, { useRef, useState } from 'react'
+import { ChevronLeft, ChevronRight } from 'lucide-react'
 
-export default function LiveMatches({ onOddsClick, selectedOdds, matches = defaultLiveMatches }) {
-  const scrollRef = useRef(null);
-  const [animatingId, setAnimatingId] = useState(null);
+export default function LiveMatches({ onOddsClick, selectedOdds, matches = [] }) {
+  const scrollRef = useRef(null)
+  const [animatingId, setAnimatingId] = useState(null)
 
   const scroll = (dir) => {
     if (scrollRef.current) {
-      scrollRef.current.scrollBy({ left: dir * 300, behavior: "smooth" });
+      scrollRef.current.scrollBy({ left: dir * 300, behavior: 'smooth' })
     }
-  };
+  }
+
+  const outcomeIndexByMarket = {
+    '1': 0,
+    X: 1,
+    '2': 2,
+  }
 
   const handleOddsClick = (match, market, odds) => {
-    const id = `live-${match.id}-${market}`;
-    setAnimatingId(id);
-    setTimeout(() => setAnimatingId(null), 200);
+    const id = `live-${match.id}-${market}`
+    setAnimatingId(id)
+    setTimeout(() => setAnimatingId(null), 200)
     onOddsClick({
       matchId: match.id,
+      marketId: match.marketId,
+      outcomeIndex: outcomeIndexByMarket[market] ?? 0,
       match: `${match.home} vs ${match.away}`,
-      selection: `${market} (${market === "1" ? "Home" : market === "2" ? "Away" : "Draw"})`,
+      selection: `${market} (${market === '1' ? 'Home' : market === '2' ? 'Away' : 'Draw'})`,
       market,
       odds,
-    });
-  };
+    })
+  }
 
-  const isSelected = (matchId, market) => {
-    return selectedOdds.some((o) => o.matchId === matchId && o.market === market);
-  };
+  const isSelected = (matchId, market) => selectedOdds.some((o) => o.matchId === matchId && o.market === market)
+
+  if (matches.length === 0) {
+    return (
+      <div className="mb-6 rounded-lg border border-light-pearl bg-cloud-whisper px-4 py-6 text-sm text-silver-ash">
+        No on-chain live matches yet.
+      </div>
+    )
+  }
 
   return (
     <div className="mb-6">
@@ -51,10 +64,7 @@ export default function LiveMatches({ onOddsClick, selectedOdds, matches = defau
 
       <div ref={scrollRef} className="flex gap-3 overflow-x-auto hide-scrollbar pb-1">
         {matches.map((match) => (
-          <div
-            key={match.id}
-            className="bg-slate-mist rounded-lg p-4 min-w-[272px] shrink-0 flex flex-col"
-          >
+          <div key={match.id} className="bg-slate-mist rounded-lg p-4 min-w-[272px] shrink-0 flex flex-col">
             <div className="flex items-center gap-1.5 mb-2">
               <span className="w-1.5 h-1.5 rounded-full bg-red-500 live-pulse" />
               <span className="font-inter text-[12px] text-silver-ash">
@@ -69,27 +79,28 @@ export default function LiveMatches({ onOddsClick, selectedOdds, matches = defau
             </div>
             <div className="flex gap-2 mt-auto">
               {Object.entries(match.odds).map(([market, odds]) => {
-                const btnId = `live-${match.id}-${market}`;
-                const sel = isSelected(match.id, market);
+                const btnId = `live-${match.id}-${market}`
+                const sel = isSelected(match.id, market)
                 return (
                   <button
                     key={market}
                     onClick={() => handleOddsClick(match, market, odds)}
                     className={`flex-1 py-2 rounded-lg border font-inter text-[13px] font-medium transition-all ${
                       sel
-                        ? "bg-sunset-orange border-sunset-orange text-white"
-                        : "border-midnight/20 text-midnight hover:bg-sunset-orange hover:border-sunset-orange hover:text-white"
-                    } ${animatingId === btnId ? "odds-pop" : ""}`}
+                        ? 'bg-sunset-orange border-sunset-orange text-white'
+                        : 'border-midnight/20 text-midnight hover:bg-sunset-orange hover:border-sunset-orange hover:text-white'
+                    } ${animatingId === btnId ? 'odds-pop' : ''}`}
                   >
                     <div className="text-[10px] opacity-60">{market}</div>
                     <div>{odds.toFixed(2)}</div>
                   </button>
-                );
+                )
               })}
             </div>
           </div>
         ))}
       </div>
     </div>
-  );
+  )
 }
+

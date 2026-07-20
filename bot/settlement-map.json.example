@@ -1,0 +1,7 @@
+{
+  "groups": [
+    { "groupId": 1, "fixtureId": 123456, "title": "Sample Group 1" },
+    { "groupId": 2, "fixtureId": 234567, "title": "Sample Group 2" },
+    { "groupId": 3, "fixtureId": 345678, "title": "Sample Group 3" }
+  ]
+}

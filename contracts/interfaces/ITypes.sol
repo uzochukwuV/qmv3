@@ -104,6 +104,7 @@ struct MarketGroup {
     uint16   homeScore;
     uint16   awayScore;
     bool     resultFinalized;
+    bytes32  settlementProofHash;
 }
 
 /// @notice An individual betting market within a MarketGroup.
@@ -123,6 +124,7 @@ struct Market {
     uint256[MAX_OUTCOMES] volumeFilled;   // per-outcome running payout liability
     uint256[MAX_OUTCOMES] slipVolumeFilled; // per-outcome liability from active multi-leg slips
     uint256 oddsLastUpdated;              // block.timestamp of last updateOdds call
+    bytes32  oddsProofHash;               // txodds odds hash/id commitment
 
     // â”€â”€ Settlement â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     uint256  exposure;
@@ -378,6 +380,7 @@ interface IQuadraticMarketEvents {
     );
     event MarketStatusChanged(uint64 indexed marketId, MarketStatus status);
     event OddsUpdated(uint64 indexed marketId, uint256[MAX_OUTCOMES] newOdds, uint256 timestamp);
+    event OddsProofPosted(uint64 indexed marketId, bytes32 indexed proofHash, string proofId);
 
     // Trading
     event BetPlaced(
@@ -419,6 +422,7 @@ interface IQuadraticMarketEvents {
     event GroupResultProposed(uint64 indexed groupId, uint16 homeScore, uint16 awayScore, address indexed oracle);
     event GroupResultOverridden(uint64 indexed groupId, uint16 homeScore, uint16 awayScore, address indexed admin);
     event GroupFinalized(uint64 indexed groupId, uint16 homeScore, uint16 awayScore);
+    event GroupSettlementProofPosted(uint64 indexed groupId, bytes32 indexed proofHash, string proofId);
     event MarketFinalized(uint64 indexed marketId, uint8 winningOutcome);
     event PayoutClaimed(uint64 indexed marketId, address indexed bettor, uint256 amount);
 

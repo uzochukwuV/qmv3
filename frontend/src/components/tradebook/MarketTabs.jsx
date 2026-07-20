@@ -1,7 +1,10 @@
-import React from "react";
-import { marketTabs as defaultMarketTabs } from "@/lib/sportsData";
+import React from 'react'
 
-export default function MarketTabs({ activeMarket, setActiveMarket, tabs = defaultMarketTabs }) {
+export default function MarketTabs({ activeMarket, setActiveMarket, tabs = [] }) {
+  if (tabs.length === 0) {
+    return null
+  }
+
   return (
     <div className="flex gap-2 overflow-x-auto hide-scrollbar pb-1 mb-4">
       {tabs.map((tab) => (
@@ -10,13 +13,13 @@ export default function MarketTabs({ activeMarket, setActiveMarket, tabs = defau
           onClick={() => setActiveMarket(tab)}
           className={`shrink-0 px-4 py-[6px] rounded-[20px] font-inter text-[13px] font-medium transition-all border ${
             activeMarket === tab
-              ? "bg-midnight text-white border-midnight"
-              : "bg-cloud-whisper text-dark-shale border-light-pearl hover:border-silver-ash"
+              ? 'bg-midnight text-white border-midnight'
+              : 'bg-cloud-whisper text-dark-shale border-light-pearl hover:border-silver-ash'
           }`}
         >
           {tab}
         </button>
       ))}
     </div>
-  );
+  )
 }

@@ -124,6 +124,11 @@ abstract contract QuadraticCoreStorage is ReentrancyGuard, IQuadraticMarketEvent
     mapping(uint64 => Order)        public orders;
     mapping(uint64 => GroupDispute) public groupDisputes;
 
+    // Txodds proof refs
+    mapping(uint64 => bytes32) public marketOddsProofHash;
+    mapping(uint64 => bytes32) public groupOddsProofHash;
+    mapping(uint64 => bytes32) public groupSettlementProofHash;
+
     // â”€â”€ Bettor positions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// @notice Payout shares: bettor â†’ marketId â†’ outcomeId â†’ payout on win.

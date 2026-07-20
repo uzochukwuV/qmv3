@@ -5,7 +5,8 @@ import { canLoadContractSnapshot, fetchDashboardSnapshot } from '@/lib/contractD
 import { getReadProvider } from '@/lib/contracts'
 
 export function useContractDashboard() {
-  const { address, ethersProvider, isLoggedIn } = useMagicSession()
+  const session = useMagicSession()
+  const { address, ethersProvider, isLoggedIn, balanceEth, balanceLoading, mockTokenAddress, mockTokenBalance, mockTokenBalanceFormatted, mockTokenDecimals, mockTokenLoading, mockTokenSymbol, reloadBalance, reloadMockTokenBalance } = session
 
   const provider = useMemo(() => ethersProvider || getReadProvider(), [ethersProvider])
 
@@ -27,5 +28,15 @@ export function useContractDashboard() {
     stats: query.data?.stats || [],
     lpStats: query.data?.lpStats || null,
     uiData: query.data || null,
+    balanceEth,
+    balanceLoading,
+    mockTokenAddress,
+    mockTokenBalance,
+    mockTokenBalanceFormatted,
+    mockTokenDecimals,
+    mockTokenLoading,
+    mockTokenSymbol,
+    reloadBalance,
+    reloadMockTokenBalance,
   }
 }

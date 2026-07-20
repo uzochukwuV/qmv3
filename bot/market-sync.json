@@ -1,0 +1,36 @@
+{
+  "fixtures": {
+    "18257739": {
+      "fixtureId": 18257739,
+      "groupId": "3",
+      "marketIds": [
+        "2",
+        "3",
+        "4"
+      ],
+      "title": "Spain vs Argentina",
+      "startTime": 1784487600,
+      "oddsPostedAt": "2026-07-16T11:22:32.902Z",
+      "proofs": [
+        {
+          "marketId": "2",
+          "marketKey": "ftr",
+          "proofHash": "0x49fc9f961b0650a156aa4b51beded89f2e45d213f5c0962a7809553b93360f31",
+          "proofId": "txodds:18257739:1784200895794:TXLineStablePriceDemargined:ftr"
+        },
+        {
+          "marketId": "3",
+          "marketKey": "ou25",
+          "proofHash": "0x5fd53785648771f44698a7a0cf675a19e2cd42c1cd45950ab7750eb980179566",
+          "proofId": "txodds:18257739:1784200895794:TXLineStablePriceDemargined:ou25"
+        },
+        {
+          "marketId": "4",
+          "marketKey": "btts",
+          "proofHash": "0xb5fce314a6c842c3128a48b17a95398a65886a98b9a112d8a7b54427993aaeb7",
+          "proofId": "txodds:18257739:1784200895794:TXLineStablePriceDemargined:btts"
+        }
+      ]
+    }
+  }
+}
