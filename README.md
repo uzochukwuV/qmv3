@@ -1,66 +1,47 @@
-# qmv3
+# TradeBook
 
-QuadraticMarket v3 is a Hardhat 3 + viem Solidity project for a decentralized fixed-odds sports betting protocol. The current contracts implement an LP-backed sportsbook model, not the original LMSR/sample Counter design.
+TradeBook is our UXmaxx Hackathon entry: a consumer-grade sports betting app for end users, built on Arbitrum Sepolia with Magic embedded wallets and a contract-backed odds/LP flow.
 
-## What Is In This Repo
+## Hackathon position
 
-- `contracts/QuadraticMarket.sol` - deployed protocol entrypoint: admin/operator controls, epoch lifecycle, market creation, odds updates, single bets, settlement, and claims.
-- `contracts/QuadraticLP.sol` - LP vault, epoch deposits, withdrawal queue, and category voting.
-- `contracts/QuadraticSlips.sol` - multi-leg accumulator slips with transferable ownership and slip settlement.
-- `contracts/QuadraticMarketStorage.sol` - shared storage, modifiers, accounting views, and exposure helpers.
-- `contracts/interfaces/ITypes.sol` - protocol enums, structs, events, errors, and create/config parameter types.
-- `contracts/libraries/LibOdds.sol` - decimal fixed-odds math, odds deviation checks, volume caps, and epoch exposure math.
-- `contracts/libraries/LibGroupDiscount.sol` - same-match parlay correlation discount and cross-match bonus logic.
-- `contracts/libraries/LibSlip.sol` - slip settlement helper logic split out to reduce main bytecode size.
-- `contracts/mocks/MockUSDC.sol` - test-only 6-decimal ERC20 used by lifecycle tests.
-- `hardhat.config.ts` - Hardhat 3 config using `@nomicfoundation/hardhat-toolbox-viem`.
-- `test/QuadraticMarket.lifecycle.ts` - end-to-end protocol lifecycle coverage.
-- `Claude1.md`, `Claude2.md`, `Claude3.md` - historical architecture notes and model-analysis transcripts.
+We are entering the General Track.
 
-## Protocol Model
+That choice matches the product we are actually shipping: a polished consumer app with low-friction onboarding, real onchain market data, a faucet for test funds, and a liquidity-provider flow driven by epochs.
 
-The protocol uses semi-static fixed odds:
+We are also aligned with the hackathon's bonus directions:
 
-1. LPs deposit base token liquidity into an epoch before `epoch.startTime`.
-2. LPs can vote on preferred `SportCategory` for that epoch.
-3. Operators create event-level `MarketGroup` records and individual markets inside those groups.
-4. Oracle-signed `oddsAnchor` values initialize each market's `currentOdds`.
-5. Operators can update odds before event start using oracle-signed payloads, subject to `maxDeviationBps`.
-6. Bettors place single-outcome bets with `buyAtOdds()` or multi-leg slips with `placeSlip()`.
-7. Payout liability is capped by per-outcome `volumeCap` and epoch-level `maxExposureMultiplierBps`.
-8. Oracle proposes results, the challenge window passes, markets finalize, and winners claim.
-9. Once epoch markets settle, LPs can queue and process withdrawals after cooldown.
+- Magic Labs bonus: embedded wallet onboarding is wired into the frontend.
+- Arbitrum bounty: the contracts and bot flow target Arbitrum Sepolia.
 
-Odds use decimal odds scaled by `ODDS_PRECISION = 1_000_000`, so `2.80` is stored as `2_800_000`.
+## What the app does
 
-## Important Contracts And Flows
+- Users sign in with Magic instead of a browser wallet extension.
+- The dashboard loads real onchain groups, markets, odds, LP stats, and epoch state.
+- The odds table is sports-style: one match per row, with the 3-market book shown inline.
+- The bet slip enforces the contract rules in the UI.
+- A faucet modal mints mock USDC for testing bets and LP flows.
+- The LP page is epoch-driven and shows the active group/market book.
+- A bot can bootstrap new epochs and create the canonical 3-market book for a match.
 
-### Epochs And LPs
+## Current contract and frontend stack
 
-- `initEpoch(epochStartTime, maxExposureMultiplierBps)` opens a deposit window.
-- `addLiquidity(amount)` is only accepted before `epoch.startTime`.
-- `voteCategory(category)` records one weighted category vote per LP per epoch.
-- `advanceEpoch()` requires all markets in the current epoch to be settled or voided, enables withdrawals, and increments `currentEpoch`.
-- `requestWithdraw(shares)` and `processWithdrawal()` use a cooldown and redeem at the worse of request-time NAV and current NAV.
+- Solidity 0.8.28 + Hardhat 3 + viem
+- Arbitrum Sepolia deployment target
+- Magic embedded wallets in the frontend
+- Bot-driven market creation and faucet services
+- Real contract snapshot loading in the dashboard
 
-### Markets And Odds
+## Repo layout
 
-- `createMarketGroup()` creates a real-world event container.
-- `createMarket(CreateMarketParams)` creates a `PreOpen` market with signed anchor odds.
-- `openMarket()` and `bulkOpenMarkets()` open eligible markets once the epoch has started.
-- `updateOdds()` updates pre-start odds using an oracle signature and deviation limits.
-- `suspendMarket()` / `resumeMarket()` halt or resume betting around operational incidents.
+- `contracts/` — Solidity contracts, libraries, and types
+- `bot/` — market sync, bootstrap, settlement, and faucet services
+- `frontend/` — React/Vite app
+- `test/` — contract and integration tests
+- `group_market_architecture.md` — original architecture reference
+- `solidity_flow.md` — simplified Solidity flow we are keeping now
+- `TSODDS.md` — Txodds integration notes
 
-### Betting And Settlement
-
-- `buyAtOdds(marketId, outcomeId, stake, minOdds)` places a single fixed-odds bet. `minOdds` is the bettor's slippage guard.
-- `placeSlip(PlaceSlipParams)` places an accumulator; all legs must share an epoch.
-- Same-event slip legs receive correlation discounts through `LibGroupDiscount`.
-- Cross-event slip combinations can receive a bounded bonus.
-- `proposeResult()`, `adminOverride()`, and `finalizeResult()` drive settlement.
-- `voidIfExpired()` is a permissionless safety net when settlement misses the deadline.
-
-## Development
+## Setup
 
 Install dependencies:
 
@@ -68,7 +49,7 @@ Install dependencies:
 npm install
 ```
 
-Compile:
+Compile contracts:
 
 ```shell
 npx hardhat compile
@@ -80,15 +61,35 @@ Run tests:
 npx hardhat test
 ```
 
-Run only TypeScript or Solidity tests:
+Build the frontend:
 
 ```shell
-npx hardhat test nodejs
-npx hardhat test solidity
+cd frontend
+npm run build
 ```
 
-## Current Gaps
+## Bot commands
 
-- There is no QuadraticMarket Ignition deployment module yet.
-- Test coverage currently has one happy-path lifecycle test; edge cases around reverts, slip handling, oracle updates, voids, and admin overrides still need focused tests.
-- Root architecture notes mention several historic LMSR decisions; the Solidity code has already pivoted to fixed odds.
+Start the faucet service:
+
+```shell
+npm run bot:faucet
+```
+
+Bootstrap the next epoch and canonical 3-market book:
+
+```shell
+npm run bot:bootstrap-epoch
+```
+
+Sync markets from Txodds:
+
+```shell
+npm run bot:sync-markets
+```
+
+## Notes
+
+- Markets currently load from the deployed contract snapshot, not mock data.
+- The contract flow is intentionally narrower than the original architecture draft: exactly 3 markets per group, group-level 9-state pricing, a single settlement authority, and LP epoch controls.
+- The README is focused on the hackathon version of the product, not the older experimental design.

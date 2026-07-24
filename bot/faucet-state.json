@@ -1,0 +1,11 @@
+{
+  "claims": {
+    "0xb048855d28bd12e6bd3b8e6480c07531e2fc7df9": {
+      "purpose": "betting",
+      "amount": "5000000000",
+      "txHash": "0x67d0e6744fd3df0515f369edd1527826acdc3d24061077d2b874f9ffaa8a62b5",
+      "lastClaimAt": 1784554377,
+      "nextEligibleAt": 1784640777
+    }
+  }
+}

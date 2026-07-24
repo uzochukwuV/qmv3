@@ -8,6 +8,20 @@ import {
 
 const MagicContext = createContext(null)
 
+async function resolveMagicAddress(client, userInfo) {
+  const fromInfo = getMagicEthereumAddress(userInfo)
+  if (fromInfo) return fromInfo
+
+  try {
+    const provider = getMagicEthersProvider(client)
+    if (!provider) return null
+    const signer = await provider.getSigner()
+    return await signer.getAddress()
+  } catch {
+    return null
+  }
+}
+
 export function MagicProvider({ children }) {
   const [magic, setMagic] = useState(null)
   const [isReady, setIsReady] = useState(false)
@@ -43,7 +57,7 @@ export function MagicProvider({ children }) {
           if (cancelled) return
 
           setUserInfo(info)
-          setAddress(getMagicEthereumAddress(info))
+          setAddress(await resolveMagicAddress(client, info))
         } else {
           setUserInfo(null)
           setAddress(null)
@@ -82,7 +96,7 @@ export function MagicProvider({ children }) {
       const info = await client.user.getInfo()
       setMagic(client)
       setUserInfo(info)
-      setAddress(getMagicEthereumAddress(info))
+      setAddress(await resolveMagicAddress(client, info))
       setIsLoggedIn(true)
       setIsReady(true)
       return info
@@ -133,7 +147,7 @@ export function MagicProvider({ children }) {
 
       const info = await client.user.getInfo()
       setUserInfo(info)
-      setAddress(getMagicEthereumAddress(info))
+      setAddress(await resolveMagicAddress(client, info))
       return info
     } finally {
       setIsLoading(false)

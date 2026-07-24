@@ -1,0 +1,42 @@
+{
+  "groups": [
+    {
+      "groupId": "5",
+      "title": "Manchester United vs Chelsea",
+      "home": "Manchester United",
+      "away": "Chelsea",
+      "state": "open",
+      "startTime": 1784566035,
+      "betCloseAt": 1784566035,
+      "settleAt": 1784580435,
+      "marketIds": [
+        "7",
+        "8",
+        "9"
+      ],
+      "markets": [
+        {
+          "marketId": "7",
+          "title": "Full-Time Result",
+          "state": "open",
+          "betCloseAt": 1784566035,
+          "settleAt": 1784580435
+        },
+        {
+          "marketId": "8",
+          "title": "Over / Under 2.5",
+          "state": "open",
+          "betCloseAt": 1784566035,
+          "settleAt": 1784580435
+        },
+        {
+          "marketId": "9",
+          "title": "Both Teams To Score",
+          "state": "open",
+          "betCloseAt": 1784566035,
+          "settleAt": 1784580435
+        }
+      ]
+    }
+  ]
+}

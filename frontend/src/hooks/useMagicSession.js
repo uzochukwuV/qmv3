@@ -20,7 +20,7 @@ export function useMagicSession() {
   const [mockTokenLoading, setMockTokenLoading] = useState(false)
   const [mockTokenAddress, setMockTokenAddress] = useState(env.VITE_MOCK_TOKEN_ADDRESS || '')
   const [mockTokenDecimals, setMockTokenDecimals] = useState(Number(env.VITE_MOCK_TOKEN_DECIMALS || 6))
-  const [mockTokenSymbol, setMockTokenSymbol] = useState(env.VITE_MOCK_TOKEN_SYMBOL || 'USDC')
+  const [mockTokenSymbol] = useState(env.VITE_MOCK_TOKEN_SYMBOL || 'USDC')
 
   const loadBalance = useCallback(async () => {
     if (!magic.ethersProvider || !magic.address) {
@@ -63,14 +63,12 @@ export function useMagicSession() {
       }
 
       const token = new Contract(tokenAddress, ERC20_ABI, provider)
-      const [balance, decimals, symbol] = await Promise.all([
+      const [balance, decimals] = await Promise.all([
         token.balanceOf(magic.address),
         token.decimals().catch(() => mockTokenDecimals),
-        token.symbol().catch(() => mockTokenSymbol),
       ])
 
       setMockTokenDecimals(Number(decimals || 6))
-      setMockTokenSymbol(symbol || 'USDC')
       setMockTokenBalance(balance)
       return balance
     } finally {
@@ -85,6 +83,16 @@ export function useMagicSession() {
   useEffect(() => {
     loadMockTokenBalance()
   }, [loadMockTokenBalance])
+
+  useEffect(() => {
+    const handleTokenUpdate = () => {
+      loadBalance()
+      loadMockTokenBalance()
+    }
+
+    window.addEventListener('mock-token-updated', handleTokenUpdate)
+    return () => window.removeEventListener('mock-token-updated', handleTokenUpdate)
+  }, [loadBalance, loadMockTokenBalance])
 
   const balanceEth = useMemo(() => formatEthBalance(balanceWei), [balanceWei])
   const mockTokenBalanceFormatted = useMemo(() => {
