@@ -3,7 +3,7 @@ import { Contract } from 'ethers'
 import TopNav from '@/components/tradebook/TopNav'
 import { useContractDashboard } from '@/hooks/useContractDashboard'
 import { CONTRACT_ADDRESSES, getCoreContract, getLiquidityVaultContract, getReadProvider } from '@/lib/contracts'
-import { parseUnits } from 'viem'
+import { parseUnits } from 'ethers'
 
 const ERC20_WRITE_ABI = [
   'function allowance(address owner, address spender) view returns (uint256)',
