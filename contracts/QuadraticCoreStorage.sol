@@ -221,6 +221,9 @@ abstract contract QuadraticCoreStorage is ReentrancyGuard, IQuadraticMarketEvent
     function _lockPayout(uint64 epochId, uint256 payout) internal {
         epochs[epochId].totalLockedPayouts += payout;
         totalLockedPayouts                 += payout;
+        if (liquidityVault != address(0)) {
+            ILiquidityVault(liquidityVault).vaultLockPayout(epochId, payout);
+        }
     }
 
     /// @dev Decrement both counters (floored at 0 to guard against rounding).
@@ -228,6 +231,9 @@ abstract contract QuadraticCoreStorage is ReentrancyGuard, IQuadraticMarketEvent
         uint256 ep = epochs[epochId].totalLockedPayouts;
         epochs[epochId].totalLockedPayouts = ep > payout ? ep - payout : 0;
         totalLockedPayouts = totalLockedPayouts > payout ? totalLockedPayouts - payout : 0;
+        if (liquidityVault != address(0)) {
+            ILiquidityVault(liquidityVault).vaultUnlockPayout(epochId, payout);
+        }
     }
 
     /// @dev Revert when LP withdrawals would race an initialized, unsettled current epoch.

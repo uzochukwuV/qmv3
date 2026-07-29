@@ -55,7 +55,7 @@ async function signCreateMarket(core: any, oracle: any, publicClient: any, param
 }
 
 describe('QuadraticSlipMarketplace', async function () {
-  const { viem, networkHelpers } = await network.create();
+  const { viem, networkHelpers } = await network.create({ network: 'hardhat' });
 
   async function deployFixture() {
     const [admin, oracle, lp, bettor1, bettor2, bettor3, bettor4, bettor5] = await viem.getWalletClients();

@@ -55,7 +55,7 @@ async function signCreateMarket(core: any, oracle: any, publicClient: any, param
 }
 
 describe('QuadraticMarket lifecycle', async function () {
-  const { viem, networkHelpers } = await network.create();
+  const { viem, networkHelpers } = await network.create({ network: 'hardhat' });
 
   async function deployFixture() {
     const [admin, oracle, lp, bettor] = await viem.getWalletClients();
@@ -227,7 +227,7 @@ describe('QuadraticMarket lifecycle', async function () {
     await core.write.proposeGroupResult([groupId, 1, 0, resultDeadline, resultSig]);
     await networkHelpers.time.increase(challengeWindow);
     await core.write.finalizeGroupResult([groupId]);
-    await core.write.claimPayout([marketIds[0]], { account: bettor.account });
+    await core.write.claimPayout([marketIds[0], 0], { account: bettor.account });
 
     assert.equal(await token.read.balanceOf([bettor.account.address]), bettorStartingBalance - stake + expectedPayout);
     assert.equal(await core.read.totalLockedPayouts(), 0n);

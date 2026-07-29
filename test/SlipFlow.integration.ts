@@ -235,7 +235,7 @@ async function seedCanonicalFootballGroup(ctx: any, title: string, marketStart: 
 }
 
 describe('Slip flow integration', async function () {
-  ({ viem, networkHelpers } = await network.create());
+  ({ viem, networkHelpers } = await network.create({ network: 'hardhat' }));
 
   it('runs five slips through LP opt-in, settlement, claim, and status logging', async function () {
     const { oracle, lp, bettors, publicClient, token, core, vault, slips, lpDeposit, bettorBalance } =

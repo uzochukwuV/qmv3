@@ -59,6 +59,11 @@ export default defineConfig({
     },
   },
   networks: {
+    hardhat: {
+      type: "edr-simulated",
+      chainType: "l1",
+      allowUnlimitedContractSize: true,
+    },
     hardhatMainnet: {
       type: "edr-simulated",
       chainType: "l1",

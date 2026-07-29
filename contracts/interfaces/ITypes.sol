@@ -430,6 +430,7 @@ interface IQuadraticMarketEvents {
     event GroupSettlementProofPosted(uint64 indexed groupId, bytes32 indexed proofHash, string proofId);
     event MarketFinalized(uint64 indexed marketId, uint8 winningOutcome);
     event PayoutClaimed(uint64 indexed marketId, address indexed bettor, uint256 amount);
+    event VoidRefunded(uint64 indexed marketId, address indexed bettor, uint256 amount);
 
     // LP
     event LiquidityAdded(address indexed lp, uint256 amount, uint256 sharesIssued, uint64 epochId);

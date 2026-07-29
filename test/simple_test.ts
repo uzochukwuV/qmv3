@@ -4,7 +4,7 @@ import { network } from "hardhat";
 import { parseUnits } from "viem";
 
 describe("Simple test", async function () {
-  const { viem, networkHelpers } = await network.create();
+  const { viem, networkHelpers } = await network.create({ network: 'hardhat' });
 
   async function deployThree() {
     const [admin, oracle, lp, bettor] = await viem.getWalletClients();

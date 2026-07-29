@@ -53,7 +53,7 @@ async function signCreateMarket(core: any, oracle: any, publicClient: any, param
 }
 
 describe('QuadraticMarket regressions', async function () {
-  const { viem, networkHelpers } = await network.create();
+  const { viem, networkHelpers } = await network.create({ network: 'hardhat' });
 
   async function deployFixture() {
     const [admin, oracle, lp, bettor] = await viem.getWalletClients();
