@@ -1,11 +1,11 @@
 import React from 'react'
-import { Football, Tennis, Basketball, Baseball, Gamepad, Activity, Tournament } from 'lucide-react'
+import { Activity, Gamepad, Trophy } from 'lucide-react'
 
 const sportIconMap = {
-  Football: Football,
-  Tennis: Tennis,
-  Basketball: Basketball,
-  'American Football': Baseball,
+  Football: Activity,
+  Tennis: Activity,
+  Basketball: Activity,
+  'American Football': Activity,
   Esports: Gamepad,
   Other: Activity,
 }
@@ -56,7 +56,7 @@ export default function Sidebar({ activeSport, setActiveSport, sportsCategories 
               key={league.name}
               className="w-full flex items-center gap-3 px-5 py-[9px] font-inter text-[13px] text-dark-shale hover:bg-cloud-whisper hover:text-midnight transition-colors text-left"
             >
-              <Tournament className="w-5 h-5 shrink-0 text-midnight" />
+              <Trophy className="w-5 h-5 shrink-0 text-midnight" />
               <span>{league.name}</span>
             </button>
           ))
