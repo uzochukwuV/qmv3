@@ -255,9 +255,7 @@ describe('Slip flow integration', async function () {
     const { groupId } = await seedCanonicalFootballGroup({ core, oracle, publicClient, networkHelpers }, 'Spain vs Argentina', marketStart);
 
     await networkHelpers.time.increaseTo(Number(epochStart));
-    await core.write.openMarket([1n]);
-    await core.write.openMarket([2n]);
-    await core.write.openMarket([3n]);
+    await core.write.openEpochForTrading();
 
     const slipSpecs = [
       buildSlip([leg(1n, 0, 1n), leg(2n, 0, 1n), leg(3n, 0, 1n)], parseUnits('10', 6)),

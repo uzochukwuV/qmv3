@@ -15,10 +15,12 @@ import "./VaultStorage.sol";
 ///
 /// Epoch lifecycle:
 ///   1. Core.initEpoch() → Core calls Vault.onEpochInit() → deposit window opens
-///   2. LPs call addLiquidity() — only while block.timestamp < epoch.startTime
-///   3. LPs optionally call voteCategory()
-///   4. Core advances epoch → Core calls Vault.onAdvanceEpoch()
-///   5. LPs call requestWithdraw() → wait cooldown → processWithdrawal()
+///   2. Admin declares markets (createMarketGroup + createMarket)
+///   3. LPs call addLiquidity() — only while block.timestamp < epoch.startTime AND trading not yet open
+///   4. Admin calls openEpochForTrading() to open all markets for betting
+///   5. Bettors place bets; exposure cap enforced per bet
+///   6. epoch.endTime passes → oracle settles markets → advanceEpoch()
+///   7. LPs call requestWithdraw() → wait cooldown → processWithdrawal()
 contract LiquidityVault is VaultStorage {
     using SafeERC20 for IERC20;
 
@@ -65,6 +67,9 @@ contract LiquidityVault is VaultStorage {
         if (!epochInitialized[eid]) revert EpochNotInitialized();
         uint256 startTime = c.getEpochStartTime(eid);
         if (block.timestamp >= startTime) revert EpochLiquidityGated();
+
+        // Trading must not yet be open for this epoch
+        if (c.epochs(eid).tradingOpen) revert EpochLiquidityGated();
 
         // Virtual-offset formula: shares = amount × (supply+1) / (balance+1)
         // Balance sampled BEFORE safeTransferFrom so incoming tokens don't inflate denominator.

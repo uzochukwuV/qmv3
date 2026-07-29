@@ -252,9 +252,7 @@ describe('QuadraticMarket regressions', async function () {
     await seedCanonicalFootballGroup(ctx, 'Cap test', marketStart, parseUnits('5', 6));
 
     await networkHelpers.time.increaseTo(Number(epochStart));
-    await ctx.core.write.openMarket([1n]);
-    await ctx.core.write.openMarket([2n]);
-    await ctx.core.write.openMarket([3n]);
+    await ctx.core.write.openEpochForTrading();
 
     await assert.rejects(
       ctx.core.write.buyAtOdds([1n, 0, parseUnits('10', 6), odds('1.9')], { account: ctx.bettor.account }),
@@ -273,9 +271,7 @@ describe('QuadraticMarket regressions', async function () {
     await seedCanonicalFootballGroup(ctx, 'Settlement test', marketStart);
 
     await networkHelpers.time.increaseTo(Number(epochStart));
-    await ctx.core.write.openMarket([1n]);
-    await ctx.core.write.openMarket([2n]);
-    await ctx.core.write.openMarket([3n]);
+    await ctx.core.write.openEpochForTrading();
 
     const stake = parseUnits('10', 6);
     await ctx.core.write.buyAtOdds([1n, 0, stake, odds('1.9')], { account: ctx.bettor.account });

@@ -10,9 +10,9 @@ import "./QuadraticMarketStorage.sol";
 ///
 /// Epoch lifecycle for LPs:
 ///   1. Admin calls initEpoch(epochStartTime, multiplierBps)
-///   2. LPs call addLiquidity() — only accepted while block.timestamp < epoch.startTime
-///   3. LPs optionally call voteCategory() to influence which sport gets markets
-///   4. Admin creates markets once epoch.startTime passes
+///   2. Admin declares markets (createMarketGroup + createMarket)
+///   3. LPs call addLiquidity() — only while block.timestamp < epoch.startTime AND trading not yet open
+///   4. Admin calls openEpochForTrading() to open all markets for betting
 ///   5. Bettors place bets; exposure cap enforced per bet
 ///   6. epoch.endTime passes → oracle settles markets → advanceEpoch()
 ///   7. LPs call requestWithdraw() → wait cooldown → processWithdrawal()
@@ -26,7 +26,8 @@ abstract contract QuadraticLP is QuadraticMarketStorage {
     // ─── Deposit ──────────────────────────────────────────────────────────────
 
     /// @notice Deposit USDC into the LP vault for the current epoch.
-    ///         Only callable during the deposit window (before epoch.startTime).
+    ///         Only callable during the deposit window (before epoch.startTime)
+    ///         and only while trading has not yet been opened for the epoch.
     ///         Mints LP shares at current NAV using the virtual-offset ERC4626 formula.
     ///
     /// @param amount  USDC amount to deposit (in base-token units, 6 decimals).
@@ -36,6 +37,7 @@ abstract contract QuadraticLP is QuadraticMarketStorage {
         Epoch storage ep = epochs[currentEpoch];
         if (!ep.initialized) revert EpochNotInitialized();
         if (block.timestamp >= ep.startTime) revert EpochLiquidityGated();
+        if (ep.tradingOpen) revert EpochLiquidityGated();
 
         // Virtual-offset formula: shares = amount × (supply+1) / (balance+1)
         // Balance sampled BEFORE safeTransferFrom so incoming tokens don't inflate denominator.

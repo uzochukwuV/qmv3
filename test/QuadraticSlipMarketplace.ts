@@ -224,9 +224,7 @@ describe('QuadraticSlipMarketplace', async function () {
     const { groupId } = await seedCanonicalFootballGroup({ core, oracle, publicClient, networkHelpers }, 'Arsenal vs Chelsea', marketStart);
 
     await networkHelpers.time.increaseTo(Number(epochStart));
-    await core.write.openMarket([1n]);
-    await core.write.openMarket([2n]);
-    await core.write.openMarket([3n]);
+    await core.write.openEpochForTrading();
 
     const winningLegs = [
       slipLeg(1n, 0, 1n),

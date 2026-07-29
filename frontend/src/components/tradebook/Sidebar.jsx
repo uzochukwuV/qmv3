@@ -1,4 +1,16 @@
 import React from 'react'
+import { Football, Tennis, Basketball, Baseball, Gamepad, Activity, Tournament } from 'lucide-react'
+
+const sportIconMap = {
+  Football: Football,
+  Tennis: Tennis,
+  Basketball: Basketball,
+  'American Football': Baseball,
+  Esports: Gamepad,
+  Other: Activity,
+}
+
+const defaultSportIcon = Activity
 
 export default function Sidebar({ activeSport, setActiveSport, sportsCategories = [], popularLeagues = [] }) {
   return (
@@ -10,6 +22,7 @@ export default function Sidebar({ activeSport, setActiveSport, sportsCategories 
         {sportsCategories.length > 0 ? (
           sportsCategories.map((sport) => {
             const isActive = activeSport === sport.name
+            const Icon = sportIconMap[sport.name] || defaultSportIcon
             return (
               <button
                 key={sport.name}
@@ -20,7 +33,7 @@ export default function Sidebar({ activeSport, setActiveSport, sportsCategories 
                     : 'border-l-[3px] border-l-transparent text-midnight hover:bg-cloud-whisper'
                 }`}
               >
-                <span className="text-base">{sport.icon}</span>
+                <Icon className="w-5 h-5 shrink-0 text-midnight" />
                 <span className="flex-1">{sport.name}</span>
                 <span className="font-inter text-[12px] text-silver-ash">({sport.count})</span>
               </button>
@@ -43,7 +56,7 @@ export default function Sidebar({ activeSport, setActiveSport, sportsCategories 
               key={league.name}
               className="w-full flex items-center gap-3 px-5 py-[9px] font-inter text-[13px] text-dark-shale hover:bg-cloud-whisper hover:text-midnight transition-colors text-left"
             >
-              <span className="text-base">{league.flag}</span>
+              <Tournament className="w-5 h-5 shrink-0 text-midnight" />
               <span>{league.name}</span>
             </button>
           ))

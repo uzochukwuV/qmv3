@@ -303,6 +303,8 @@ contract Core is QuadraticCoreStorage {
         ep.initialized              = true;
         ep.allMarketsSettled        = true;
         ep.withdrawalsEnabled       = false;
+        ep.marketsDeclared          = false;
+        ep.tradingOpen              = false;
         ep.lpSharesAtClose          = 0;
         ep.totalLiquidityAdded      = 0;
         ep.totalLiquidityRemoved    = 0;
@@ -504,17 +506,46 @@ contract Core is QuadraticCoreStorage {
 
         unchecked { ++ep.numMarkets; }
         ep.allMarketsSettled = false;
+        if (ep.numMarkets == 1) {
+            ep.marketsDeclared = true;
+        }
 
         emit MarketCreated(marketId, p.groupId, p.marketType, p.title, p.startTime);
     }
 
-    /// @notice Flip a single PreOpen market to Open (epoch must have started).
+    /// @notice Open the current epoch for trading after markets have been declared.
+    ///         Transitions all PreOpen markets in the epoch to Open.
+    ///         Can only be called at or after epoch.startTime.
+    function openEpochForTrading() external onlyAuthorized {
+        Epoch storage ep = epochs[currentEpoch];
+        if (!ep.initialized) revert EpochNotInitialized();
+        if (!ep.marketsDeclared) revert MarketsNotDeclared();
+        if (block.timestamp < ep.startTime) revert EpochLiquidityGated();
+        if (ep.tradingOpen) revert InvalidMarketStatus();
+
+        ep.tradingOpen = true;
+
+        // Open all PreOpen markets in this epoch
+        for (uint64 mid = 1; mid < nextMarketId; ) {
+            Market storage m = markets[mid];
+            if (m.marketId != 0 && m.epochId == currentEpoch && m.status == MarketStatus.PreOpen) {
+                m.status = MarketStatus.Open;
+                emit MarketStatusChanged(mid, MarketStatus.Open);
+            }
+            unchecked { ++mid; }
+        }
+
+        emit EpochTradingOpened(currentEpoch);
+    }
+
+    /// @notice Flip a single PreOpen market to Open (epoch must have started and trading opened).
     function openMarket(uint64 marketId) public onlyAuthorized {
         Market storage m = markets[marketId];
         if (m.marketId == 0 || m.status != MarketStatus.PreOpen) revert InvalidMarketStatus();
 
         Epoch storage ep = epochs[m.epochId];
         if (!ep.initialized)               revert EpochNotInitialized();
+        if (!ep.tradingOpen)               revert EpochLiquidityGated();
         if (block.timestamp < ep.startTime) revert EpochLiquidityGated();
 
         m.status = MarketStatus.Open;
@@ -529,7 +560,7 @@ contract Core is QuadraticCoreStorage {
             Market storage m = markets[mid];
             if (m.marketId != 0 && m.status == MarketStatus.PreOpen) {
                 Epoch storage ep = epochs[m.epochId];
-                if (ep.initialized && block.timestamp >= ep.startTime) {
+                if (ep.initialized && ep.tradingOpen && block.timestamp >= ep.startTime) {
                     m.status = MarketStatus.Open;
                     emit MarketStatusChanged(mid, MarketStatus.Open);
                 }
@@ -650,6 +681,9 @@ function buyAtOdds(
         _requireOpen(marketId);
         _requireNotStarted(marketId);
         if (outcomeId >= m.numOutcomes) revert InvalidOutcomeId();
+
+        Epoch storage ep = epochs[m.epochId];
+        if (!ep.tradingOpen) revert EpochLiquidityGated();
 
         uint256 odds = _marketCurrentOdds(m, outcomeId);
         if (odds < minOdds) revert OddsSlippageExceeded();
