@@ -188,16 +188,18 @@ struct EpochSlipView {
 ///
 /// Timeline:
 ///   [initEpoch called]
-///     â†’ deposit window opens  (LPs deposit USDC, receive shares)
+///     → deposit window opens (LPs deposit USDC, receive shares)
+///     → admin declares markets (createMarketGroup + createMarket)
 ///   [startTime]
-///     â†’ deposit window CLOSES (no more deposits)
-///     â†’ markets open for betting
+///     → deposit window CLOSES (no more deposits)
+///     → admin calls openEpochForTrading() to open all markets
+///     → markets open for betting
 ///   [endTime]
-///     â†’ no new bets accepted
-///     â†’ oracle settles markets
+///     → no new bets accepted
+///     → oracle settles markets
 ///   [allMarketsSettled == true]
-///     â†’ withdrawalsEnabled flipped by advanceEpoch
-///     â†’ LPs requestWithdraw â†’ processWithdrawal (after cooldown)
+///     → withdrawalsEnabled flipped by advanceEpoch
+///     → LPs requestWithdraw → processWithdrawal (after cooldown)
 struct Epoch {
     uint64   epochId;
     uint256  startTime;           // epoch trading begins; deposit window closes here
@@ -209,10 +211,12 @@ struct Epoch {
     bool     allMarketsSettled;
     bool     withdrawalsEnabled;
     bool     initialized;            // guards against double-init (fixes epoch-0 bug)
+    bool     marketsDeclared;        // true when at least one market has been created
+    bool     tradingOpen;            // true when openEpochForTrading() has been called
     uint256  lpSharesAtClose;
     // Risk controls (from MD files)
-    uint256  maxExposureMultiplierBps; // e.g. 15_000 = 1.5Ã— â†’ max LP loss = 50% of deposit
-    uint256  totalLockedPayouts;       // running payout obligations; must stay â‰¤ maxExposure
+    uint256  maxExposureMultiplierBps; // e.g. 15_000 = 1.5× → max LP loss = 50% of deposit
+    uint256  totalLockedPayouts;       // running payout obligations; must stay ≤ maxExposure
     // Category governance
     uint8    winningSportCategory;     // SportCategory with most vote-weight this epoch
 }
@@ -369,6 +373,7 @@ interface IQuadraticMarketEvents {
     // Epoch
     event EpochInitialized(uint64 indexed epochId, uint256 startTime, uint256 endTime);
     event EpochAdvanced(uint64 indexed prevEpoch, uint64 indexed newEpoch);
+    event EpochTradingOpened(uint64 indexed epochId);
 
     // Markets
     event MarketCreated(
@@ -523,6 +528,7 @@ interface IQuadraticMarketErrors {
     error EpochNotSettled();
     error EpochAlreadyInitialized();
     error EpochNotInitialized();
+    error MarketsNotDeclared();
     error WithdrawalCooldownActive();
     error NoPendingWithdrawal();
     error EpochLiquidityGated();

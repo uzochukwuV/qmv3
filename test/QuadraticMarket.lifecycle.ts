@@ -208,9 +208,7 @@ describe('QuadraticMarket lifecycle', async function () {
     const { groupId, marketIds } = await seedCanonicalFootballGroup({ core, oracle, publicClient, networkHelpers }, 'Arsenal vs Chelsea', marketStart);
 
     await networkHelpers.time.increaseTo(Number(epochStart));
-    await core.write.openMarket([marketIds[0]]);
-    await core.write.openMarket([marketIds[1]]);
-    await core.write.openMarket([marketIds[2]]);
+    await core.write.openEpochForTrading();
 
     const stake = parseUnits('100', 6);
     await core.write.buyAtOdds([marketIds[0], 0, stake, odds('1.9')], { account: bettor.account });
@@ -265,9 +263,7 @@ describe('QuadraticMarket lifecycle', async function () {
     );
 
     await networkHelpers.time.increaseTo(Number(epoch1Start));
-    for (const marketId of epoch1Group.marketIds) {
-      await core.write.openMarket([marketId]);
-    }
+    await core.write.openEpochForTrading();
 
     const stake = parseUnits('100', 6);
     await core.write.buyAtOdds([epoch1Group.marketIds[0], 0, stake, odds('1.9')], { account: bettor.account });
@@ -297,9 +293,7 @@ describe('QuadraticMarket lifecycle', async function () {
     );
 
     await networkHelpers.time.increaseTo(Number(epoch2Start));
-    for (const marketId of epoch2Group.marketIds) {
-      await core.write.openMarket([marketId]);
-    }
+    await core.write.openEpochForTrading();
 
     const frozenNav = await vault.read.lpNav();
     const frozenValue = await vault.read.lpValue([lp.account.address]);

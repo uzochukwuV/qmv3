@@ -13,13 +13,27 @@ This document describes the Solidity implementation slice that is being built an
 
 ## Core on-chain model
 
-A market group represents one football match. Each group contains exactly these 3 markets:
-
-1. 1x2: Home / Draw / Away
-2. Over / Under 2.5
-3. GG / NG
+A market group represents one football match. Each group contains exactly three correlated markets: 1x2, Over/Under 2.5, and GG/NG.
 
 The group owns the pricing state. Individual markets do not maintain separate pricing models beyond their projected odds.
+
+## Epoch Flow (with Market Declaration Phase)
+
+The epoch lifecycle now has an explicit declaration phase that separates market creation from trading:
+
+1. **`initEpoch()`** — Admin initializes the epoch. Deposit window opens. `marketsDeclared = false`, `tradingOpen = false`.
+2. **Declaration Phase** — Admin creates the MarketGroup and individual Markets via `createMarketGroup()` + `createMarket()`. Markets stay in `PreOpen` status. LPs can see what markets exist and decide to deposit.
+3. **Deposit Window** — LPs call `addLiquidity()` to deposit USDC and receive LP shares. Deposits are gated by `block.timestamp < epoch.startTime` AND `!tradingOpen`.
+4. **`openEpochForTrading()`** — Admin calls this function to transition from declaration to trading. It:
+   - Requires `marketsDeclared == true` (markets must be declared first)
+   - Requires `block.timestamp >= epoch.startTime` (can't open before start time)
+   - Sets `tradingOpen = true`
+   - Opens all `PreOpen` markets in the epoch to `Open`
+   - Emits `EpochTradingOpened`
+5. **Trading Phase** — Bettors call `buyAtOdds()`. Oracle calls `updateOdds()`. Markets can also be individually opened via `openMarket()` or `bulkOpenMarkets()` (both require `tradingOpen == true`).
+6. **Settlement** — Oracle proposes group result, markets finalize.
+7. **`advanceEpoch()`** — Flips `withdrawalsEnabled`, increments epoch.
+8. **Withdrawal** — LPs request and process withdrawals.
 
 ## Pricing
 
@@ -44,7 +58,7 @@ Settlement is group-scoped.
 The LP flow is epoch-based.
 
 - LPs opt in before the epoch starts.
-- Deposits close once trading opens.
+- Deposits close when trading opens (either at `startTime` or when `openEpochForTrading()` is called, whichever is later).
 - Withdrawals are only allowed after the relevant epoch is eligible.
 - Treasury accounting must respect locked payouts and epoch constraints.
 
