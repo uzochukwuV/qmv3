@@ -7,6 +7,7 @@ import MarketTabs from '@/components/tradebook/MarketTabs'
 import OddsTable from '@/components/tradebook/OddsTable'
 import BetSlip from '@/components/tradebook/BetSlip'
 import { useContractDashboard } from '@/hooks/useContractDashboard'
+import { Loader2 } from 'lucide-react'
 
 const initialState = {
   activeNav: 'Pre-Match',
@@ -120,55 +121,60 @@ export default function Dashboard() {
       />
       <StatsBar stats={dashboardData.stats || []} />
 
-      <div className="flex flex-1 overflow-hidden">
-        <Sidebar
-          activeSport={state.activeSport}
-          setActiveSport={(value) => dispatch({ type: 'SET_SPORT', value })}
-          sportsCategories={dashboardData.sportsCategories || []}
-          popularLeagues={dashboardData.popularLeagues || []}
-        />
-
-        <main className="flex-1 overflow-y-auto px-4 lg:px-6 py-4">
-          {isLoading ? (
-            <div className="mb-4 rounded-lg border border-light-pearl bg-cloud-whisper px-4 py-3 text-sm text-silver-ash">
+      {isLoading ? (
+        <div className="flex-1 flex items-center justify-center">
+          <div className="flex flex-col items-center gap-3">
+            <Loader2 className="w-8 h-8 animate-spin text-sunset-orange" />
+            <span className="font-inter text-[14px] text-silver-ash">
               Loading on-chain market snapshot...
-            </div>
-          ) : null}
+            </span>
+          </div>
+        </div>
+      ) : (
+        <div className="flex flex-1 overflow-hidden">
+          <Sidebar
+            activeSport={state.activeSport}
+            setActiveSport={(value) => dispatch({ type: 'SET_SPORT', value })}
+            sportsCategories={dashboardData.sportsCategories || []}
+            popularLeagues={dashboardData.popularLeagues || []}
+          />
 
-          <LiveMatches
-            onOddsClick={handleOddsClick}
-            selectedOdds={selectedOdds}
-            matches={dashboardData.liveMatches || []}
-          />
-          <MarketTabs
-            activeMarket={state.activeMarket}
-            setActiveMarket={(value) => dispatch({ type: 'SET_MARKET', value })}
-            tabs={dashboardData.marketTabs || []}
-          />
-          <OddsTable
-            activeMarket={state.activeMarket}
-            onOddsClick={handleOddsClick}
-            selectedOdds={selectedOdds}
-            leagues={dashboardData.matchesByLeague || []}
-            columns={dashboardData.oddsColumns || []}
-            columnMap={dashboardData.marketColumnMap || {}}
-            labelMap={dashboardData.oddsLabelMap || {}}
-            groups={dashboardData.groups || []}
-          />
-        </main>
+          <main className="flex-1 overflow-y-auto px-4 lg:px-6 py-4">
+            <LiveMatches
+              onOddsClick={handleOddsClick}
+              selectedOdds={selectedOdds}
+              matches={dashboardData.liveMatches || []}
+            />
+            <MarketTabs
+              activeMarket={state.activeMarket}
+              setActiveMarket={(value) => dispatch({ type: 'SET_MARKET', value })}
+              tabs={dashboardData.marketTabs || []}
+            />
+            <OddsTable
+              activeMarket={state.activeMarket}
+              onOddsClick={handleOddsClick}
+              selectedOdds={selectedOdds}
+              leagues={dashboardData.matchesByLeague || []}
+              columns={dashboardData.oddsColumns || []}
+              columnMap={dashboardData.marketColumnMap || {}}
+              labelMap={dashboardData.oddsLabelMap || {}}
+              groups={dashboardData.groups || []}
+            />
+          </main>
 
-        <BetSlip
-          bets={state.betSlip}
-          history={dashboardData.betHistory || []}
-          onRemoveBet={handleRemoveBet}
-          onClearSlip={handleClearSlip}
-          tokenBalanceFormatted={mockTokenBalanceFormatted}
-          tokenBalanceLoading={mockTokenLoading}
-          tokenSymbol={mockTokenSymbol}
-          walletAddress={walletAddress}
-          currentEpoch={currentEpoch}
-        />
-      </div>
+          <BetSlip
+            bets={state.betSlip}
+            history={dashboardData.betHistory || []}
+            onRemoveBet={handleRemoveBet}
+            onClearSlip={handleClearSlip}
+            tokenBalanceFormatted={mockTokenBalanceFormatted}
+            tokenBalanceLoading={mockTokenLoading}
+            tokenSymbol={mockTokenSymbol}
+            walletAddress={walletAddress}
+            currentEpoch={currentEpoch}
+          />
+        </div>
+      )}
     </div>
   )
 }
